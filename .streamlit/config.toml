@@ -1,0 +1,11 @@
+# Streamlit's file watcher inspects every loaded Python module (not just this project's files)
+# to decide what to auto-reload on save. `transformers` (pulled in by sentence-transformers)
+# lazy-loads optional vision submodules when probed this way, and several of those need
+# `torchvision`, which this project doesn't install (it's only needed for image models, not the
+# text embedding model used here) — so the watcher logs a wall of harmless but alarming-looking
+# ModuleNotFoundError tracebacks to the terminal on every startup. Disabling the watcher removes
+# that noise entirely. Trade-off: editing app.py while `streamlit run` is active won't
+# auto-reload — stop and restart it to pick up code changes. Delete this file (or set the value
+# back to "auto") if you'd rather have auto-reload and don't mind the terminal noise.
+[server]
+fileWatcherType = "none"

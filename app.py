@@ -1,0 +1,524 @@
+"""
+Streamlit UI for the agent — a thin interface layer over graph.py/config.py. No agent logic
+lives here; this only collects input, runs the agent in a background thread so the UI stays
+responsive, and renders live progress as one card per pipeline node (input -> output), plus a
+collapsed full raw log for debugging. Also renders the same state that main.py's CLI writes to
+output/*.json.
+
+Run:  streamlit run app.py
+
+--- Why cards instead of one scrolling log box (design note) ---
+A run can take many minutes on local/CPU hardware, and most of that time is spent inside a
+single node waiting on the LLM. A flat log box makes that feel like noise: the same
+"still generating locally..." line repeats for minutes with nothing that looks like progress.
+Instead, each of the 7 graph nodes (architecture doc §2.2) gets its own card showing: a status
+badge (pending/running/done/error), a one-line summary of what went IN to the node, and once
+it finishes, a one-line-to-few-line summary of what came OUT. While a node is running, the card
+shows a single live-updating sub-status line (the latest thing the agent's logger said) instead
+of an ever-growing wall of text — except the per-paper extraction node, which gets a small live
+checklist (1 line per paper) since that node's whole point is per-item progress. The full,
+unfiltered log is still available in a collapsed expander and as a download, for debugging.
+"""
+import datetime
+import json
+import logging
+import queue
+import os
+import re
+import threading
+import time
+
+import streamlit as st
+
+from config import CONFIG
+from graph import build_graph
+from logging_utils import QueueLogHandler, quiet_noisy_third_party_loggers
+from main import render_report
+
+st.set_page_config(page_title="AI Research Assistant Agent", layout="wide")
+
+CONFIDENCE_COLOR = {"High": "green", "Medium": "orange", "Low": "red"}
+LOG_BOX_HEIGHT = 300
+PAPER_BOX_HEIGHT = 180
+
+# ---------------------------------------------------------------------------
+# Node metadata + graph shape (mirrors graph.py exactly — see that file for the real edges).
+# ---------------------------------------------------------------------------
+NODE_ORDER = [
+    "generate_keywords", "search_sources", "filter_and_rank", "check_sufficiency",
+    "extract_paper_data", "compare_papers", "analyze_gaps",
+]
+NODE_META = {
+    "generate_keywords": ("🔑", "Generate search keywords"),
+    "search_sources": ("🔍", "Search academic sources"),
+    "filter_and_rank": ("📊", "Rank papers by relevance"),
+    "check_sufficiency": ("✅", "Check if enough papers found"),
+    "extract_paper_data": ("📄", "Extract data from each paper"),
+    "compare_papers": ("🔬", "Compare papers & synthesize trends"),
+    "analyze_gaps": ("💡", "Propose & verify research gaps"),
+}
+# Linear "what runs next" edges. check_sufficiency is conditional (handled specially below) and
+# analyze_gaps has no successor (END) — see graph.py.
+NEXT_NODE = {
+    "generate_keywords": "search_sources",
+    "search_sources": "filter_and_rank",
+    "filter_and_rank": "check_sufficiency",
+    "extract_paper_data": "compare_papers",
+    "compare_papers": "analyze_gaps",
+}
+RETRY_RESET_KEYS = ["generate_keywords", "search_sources", "filter_and_rank", "check_sufficiency"]
+
+# logging_utils.LOG_FORMAT is "HH:MM:SS  LEVEL   name             message" (no separator before
+# the message) — this strips that prefix so cards show just the message, not log plumbing.
+_LOG_PREFIX_RE = re.compile(r"^\d{2}:\d{2}:\d{2}\s+\S+\s+\S+\s+")
+
+# Per-paper progress lines from nodes.extract_paper_data — see that function's logger.info calls.
+_EXTRACTING_RE = re.compile(r"\[(\d+)/(\d+)\] Extracting \(([^)]+)\): (.*)")
+_SKIPPED_RE = re.compile(r"\[(\d+)/(\d+)\] SKIPPED[^:]*: (.*)")
+_FAILED_RE = re.compile(r"\[(\d+)/(\d+)\] Extraction FAILED for (\S+) \(([\d.]+)s\): (.*)")
+_DONE_RE = re.compile(r"\[(\d+)/(\d+)\] Done \(([\d.]+)s\): (.*)")
+
+
+def _new_card_state():
+    return {
+        "status": "pending",  # pending | running | done | error
+        "started_at": None,
+        "finished_at": None,
+        "attempt": 1,
+        "input_summary": "",
+        "output_summary": "",
+        "sub_status": "",
+        "error": "",
+        "papers": {},  # extract_paper_data only: {index: {"total", "title", "status", "seconds"}}
+    }
+
+
+def _summarize_input(node_key: str, acc: dict) -> str:
+    if node_key == "generate_keywords":
+        topic = acc.get("research_topic", "")
+        prior = acc.get("prior_queries_tried") or []
+        if prior:
+            return f'Topic: "{topic}" — avoiding {len(prior)} previously tried quer{"y" if len(prior) == 1 else "ies"}'
+        return f'Topic: "{topic}"'
+    if node_key == "search_sources":
+        queries = acc.get("search_queries") or []
+        return f"{len(queries)} quer{'y' if len(queries) == 1 else 'ies'} across {', '.join(CONFIG.enabled_sources)}"
+    if node_key == "filter_and_rank":
+        n = len(acc.get("candidate_papers") or [])
+        return f"{n} candidate papers to rank by similarity to the topic"
+    if node_key == "check_sufficiency":
+        n = len(acc.get("selected_papers") or [])
+        return f"{n} papers selected so far (need ≥ {CONFIG.min_papers_before_retry})"
+    if node_key == "extract_paper_data":
+        n = len(acc.get("selected_papers") or [])
+        return f"{n} papers to extract method/dataset/findings from"
+    if node_key == "compare_papers":
+        n = len(acc.get("paper_extracts") or [])
+        return f"{n} extracted papers to compare"
+    if node_key == "analyze_gaps":
+        return "Comparison table + cross-paper trend summary"
+    return ""
+
+
+def _summarize_output(node_key: str, update: dict, acc: dict) -> str:
+    if node_key == "generate_keywords":
+        qs = update.get("search_queries") or []
+        return "Queries: " + "; ".join(f'"{q}"' for q in qs)
+    if node_key == "search_sources":
+        n = len(update.get("candidate_papers") or [])
+        return f"Found **{n}** unique candidate papers after dedup"
+    if node_key == "filter_and_rank":
+        sel = update.get("selected_papers") or []
+        ranked = update.get("ranked_papers") or []
+        return f"**{len(ranked)}** passed the similarity threshold — top **{len(sel)}** selected for deep analysis"
+    if node_key == "check_sufficiency":
+        if update.get("sufficient"):
+            return "Sufficient papers found — proceeding to extraction"
+        if update.get("retry_count", 0) >= CONFIG.max_retry_loops:
+            return f"Still short on papers after {CONFIG.max_retry_loops} retries — proceeding anyway"
+        return "Not enough papers yet — retrying with broader keywords"
+    if node_key == "extract_paper_data":
+        n = len(update.get("paper_extracts") or [])
+        return f"Successfully extracted structured data from **{n}** papers"
+    if node_key == "compare_papers":
+        trend = update.get("trend_summary") or ""
+        preview = trend[:280] + ("…" if len(trend) > 280 else "")
+        return f"Trend summary: {preview}"
+    if node_key == "analyze_gaps":
+        gaps = update.get("gap_candidates") or []
+        if not gaps:
+            return "No gap candidates survived verification"
+        return "\n".join(f"- {g['claim']} _( {g['confidence_level']}, {g['confidence_score']}/100 )_" for g in gaps)
+    return ""
+
+
+def _apply_paper_progress_line(card: dict, line: str):
+    """Parse one raw log line from extract_paper_data's per-paper loop into card['papers']."""
+    m = _EXTRACTING_RE.search(line)
+    if m:
+        i, total, method, title = m.groups()
+        card["papers"][int(i)] = {"total": int(total), "title": title, "status": "running", "seconds": None, "method": method}
+        return
+    m = _DONE_RE.search(line)
+    if m:
+        i, total, secs, title = m.groups()
+        card["papers"][int(i)] = {"total": int(total), "title": title, "status": "done", "seconds": float(secs)}
+        return
+    m = _FAILED_RE.search(line)
+    if m:
+        i, total, paper_id, secs, _err = m.groups()
+        card["papers"][int(i)] = {"total": int(total), "title": paper_id, "status": "failed", "seconds": float(secs)}
+        return
+    m = _SKIPPED_RE.search(line)
+    if m:
+        i, total, title = m.groups()
+        card["papers"][int(i)] = {"total": int(total), "title": title, "status": "skipped", "seconds": None}
+        return
+
+
+_PAPER_ICON = {"running": "⏳", "done": "✅", "failed": "❌", "skipped": "⏭️"}
+
+
+def _paper_checklist_text(papers: dict) -> str:
+    lines = []
+    for i in sorted(papers):
+        p = papers[i]
+        icon = _PAPER_ICON.get(p["status"], "•")
+        title = (p.get("title") or "")[:70]
+        secs = f" ({p['seconds']:.0f}s)" if p.get("seconds") is not None else " — working..."
+        lines.append(f"{icon} [{i}/{p['total']}] {title}{secs}")
+    return "\n".join(lines) if lines else "starting..."
+
+
+def _status_label(card: dict) -> str:
+    label = {"pending": "pending", "running": "running", "done": "done", "error": "error"}[card["status"]]
+    icon = {"pending": "⏸️", "running": "⏳", "done": "✅", "error": "⚠️"}[card["status"]]
+    elapsed = ""
+    if card["started_at"] is not None:
+        end = card["finished_at"] if card["finished_at"] is not None else time.monotonic()
+        elapsed = f" · {end - card['started_at']:.0f}s"
+    attempt = f" · attempt {card['attempt']}" if card["attempt"] > 1 else ""
+    return f"{icon} {label}{elapsed}{attempt}"
+
+
+def _render_card(placeholder, node_key: str, card: dict):
+    icon, title = NODE_META[node_key]
+    with placeholder.container(border=True):
+        st.markdown(f"**{icon} {title}**")
+        st.caption(_status_label(card))
+        if card["input_summary"]:
+            st.caption(f"Input: {card['input_summary']}")
+        if card["status"] == "running":
+            if node_key == "extract_paper_data" and card["papers"]:
+                with st.container(height=PAPER_BOX_HEIGHT, border=True):
+                    st.code(_paper_checklist_text(card["papers"]), language=None)
+            elif card["sub_status"]:
+                st.caption(f"⏳ {card['sub_status']}")
+        if card["status"] == "done":
+            if node_key == "extract_paper_data" and card["papers"]:
+                with st.container(height=PAPER_BOX_HEIGHT, border=True):
+                    st.code(_paper_checklist_text(card["papers"]), language=None)
+            if card["output_summary"]:
+                st.markdown(card["output_summary"])
+        if card["status"] == "error" and card["error"]:
+            st.error(card["error"])
+
+
+if "final_state" not in st.session_state:
+    st.session_state.final_state = None
+if "log_lines" not in st.session_state:
+    st.session_state.log_lines = []
+
+# ---------------------------------------------------------------------------
+# Sidebar: runtime settings. These mutate the shared CONFIG object directly —
+# every node reads CONFIG fresh on each call, so this takes effect immediately,
+# no restart needed. See config.py / llm_client.py.
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.header("Settings")
+
+    backend = st.radio("LLM backend", ["cloud", "local"], index=0 if CONFIG.llm_backend == "cloud" else 1,
+                        help="Cloud = Anthropic API (needs a key). Local = Ollama running on this machine.")
+    CONFIG.llm_backend = backend
+
+    if backend == "cloud":
+        key = st.text_input("Anthropic API key", value=CONFIG.anthropic_api_key, type="password",
+                             help="Or set ANTHROPIC_API_KEY in .env to avoid re-entering this.")
+        CONFIG.anthropic_api_key = key or CONFIG.anthropic_api_key
+    else:
+        CONFIG.ollama_host = st.text_input("Ollama host", value=CONFIG.ollama_host)
+        st.caption(f"Models: {CONFIG.local_model_fast} (fast) / {CONFIG.local_model_strong} (strong) "
+                   f"— change in .env. Make sure `ollama pull` was run for both.")
+        CONFIG.ollama_think = st.checkbox(
+            "Enable model 'thinking' mode", value=CONFIG.ollama_think,
+            help="Off by default for speed — reasoning models like Qwen3 spend most of their time on an "
+                 "internal reasoning trace this project's tasks don't need. Turn on only if you have fast "
+                 "hardware and want to try it for the 'strong' tier's reasoning quality.",
+        )
+
+    st.divider()
+    CONFIG.max_deep_analysis_papers = st.slider(
+        "Papers to deep-analyze", min_value=5, max_value=40, value=CONFIG.max_deep_analysis_papers,
+        help="Higher = more thorough but slower and more expensive (architecture doc §7.4).",
+    )
+    source_options = ["semantic_scholar", "arxiv", "openalex"]
+    selected_sources = st.multiselect("Data sources", source_options, default=list(CONFIG.enabled_sources))
+    CONFIG.enabled_sources = tuple(selected_sources) if selected_sources else tuple(source_options)
+
+    CONFIG.fetch_full_text = st.checkbox(
+        "Fetch full-text PDFs", value=CONFIG.fetch_full_text,
+        help="Downloads each selected paper's open-access PDF and converts it to Markdown for extraction, "
+             "instead of using only the abstract — more accurate, but roughly doubles Node 5's time per "
+             "paper. Results are cached (pdf_cache/), so re-running the same topic is fast the 2nd time.",
+    )
+
+# ---------------------------------------------------------------------------
+# Main input
+# ---------------------------------------------------------------------------
+st.title("AI Research Assistant Agent")
+st.caption("Find, compare, and identify research gaps across academic papers.")
+
+topic = st.text_input("Research topic", placeholder="e.g. few-shot named entity recognition in low-resource languages")
+c1, c2, c3 = st.columns([1, 1, 2])
+year_from = c1.number_input("Year from", min_value=1990, max_value=2030, value=2020, step=1)
+year_to = c2.number_input("Year to", min_value=1990, max_value=2030, value=2026, step=1)
+run_clicked = c3.button("Run agent", type="primary", use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# Run in a background thread + live per-node step cards.
+#
+# Why a thread: LangGraph's graph.stream() only yields once a node finishes, so without a thread
+# the UI would only update once per node (fine for "which step are we on", useless for seeing
+# progress *inside* a slow node, e.g. paper 7 of 20 during extraction). Running the graph in a
+# background thread and piping (a) its logger output and (b) each node's completion event
+# through two queues lets the main Streamlit thread redraw the cards every ~150ms regardless of
+# what the agent is doing.
+#
+# Thread safety: only the main thread calls any st.* function. The background thread only calls
+# logging.info(...) and queue.put(...) (both thread-safe) — it never touches Streamlit.
+# ---------------------------------------------------------------------------
+if run_clicked:
+    if not topic.strip():
+        st.error("Enter a research topic first.")
+    elif backend == "cloud" and not CONFIG.anthropic_api_key:
+        st.error("Enter an Anthropic API key in the sidebar, or switch to the local backend.")
+    else:
+        agent_graph = build_graph()
+        initial_state = {
+            "research_topic": topic,
+            "year_from": int(year_from),
+            "year_to": int(year_to),
+            "max_papers": CONFIG.max_deep_analysis_papers,
+            "prior_queries_tried": [],
+            "retry_count": 0,
+        }
+
+        # Always capture everything the agent itself logs (no level picker needed) — the only
+        # filtering is muting third-party wire-level noise (see logging_utils) so both the raw
+        # log and the cards' sub-status lines stay readable.
+        log_queue: "queue.Queue[str]" = queue.Queue()
+        event_queue: "queue.Queue[tuple]" = queue.Queue()
+        handler = QueueLogHandler(log_queue)
+        handler.setLevel(logging.INFO)
+        root_logger = logging.getLogger()
+        prev_level = root_logger.level
+        root_logger.setLevel(logging.INFO)
+        root_logger.addHandler(handler)
+        quiet_noisy_third_party_loggers()
+
+        run_result = {"state": None, "error": None}
+
+        def _run_agent():
+            try:
+                final = dict(initial_state)
+                for step in agent_graph.stream(initial_state):
+                    for node_name, node_update in step.items():
+                        final.update(node_update)
+                        event_queue.put(("node_done", node_name, node_update, dict(final)))
+                run_result["state"] = final
+            except Exception as e:  # surfaced in the main thread below, not raised here
+                run_result["error"] = e
+            finally:
+                event_queue.put(("run_finished",))
+
+        worker = threading.Thread(target=_run_agent, daemon=True)
+        worker.start()
+
+        st.session_state.log_lines = []
+
+        # --- card state setup ---
+        cards = {key: _new_card_state() for key in NODE_ORDER}
+        acc_state = dict(initial_state)
+        cards["generate_keywords"]["status"] = "running"
+        cards["generate_keywords"]["started_at"] = time.monotonic()
+        cards["generate_keywords"]["input_summary"] = _summarize_input("generate_keywords", acc_state)
+
+        st.caption("Each card below is one step of the pipeline — see architecture doc §2.2.")
+        placeholders = {key: st.empty() for key in NODE_ORDER}
+        for key in NODE_ORDER:
+            _render_card(placeholders[key], key, cards[key])
+
+        # Full raw log, live — kept visible under the cards for the whole run (not just after),
+        # per request: this is the "print everything" box, always on screen, not tucked behind a
+        # click. The cards above are the readable summary; this is the unfiltered detail under it.
+        st.divider()
+        st.subheader("Full run log")
+        log_box_placeholder = st.empty()
+
+        def _draw_log_box():
+            text = "\n".join(st.session_state.log_lines) if st.session_state.log_lines else "waiting for the agent to start..."
+            with log_box_placeholder.container(height=LOG_BOX_HEIGHT, border=True):
+                st.code(text, language=None)
+
+        _draw_log_box()
+
+        run_finished = False
+        while not run_finished:
+            redraw = set()
+            log_updated = False
+
+            # Drain raw log lines: feed the currently-running card's sub-status line, and (for
+            # the extraction node) parse per-paper progress out of them.
+            while True:
+                try:
+                    line = log_queue.get_nowait()
+                except queue.Empty:
+                    break
+                st.session_state.log_lines.append(line)
+                log_updated = True
+                running_key = next((k for k in NODE_ORDER if cards[k]["status"] == "running"), None)
+                if running_key:
+                    msg = _LOG_PREFIX_RE.sub("", line, count=1)
+                    cards[running_key]["sub_status"] = msg.strip()[:160]
+                    if running_key == "extract_paper_data":
+                        _apply_paper_progress_line(cards[running_key], line)
+                    redraw.add(running_key)
+
+            # Drain node-completion events.
+            while True:
+                try:
+                    event = event_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if event[0] == "run_finished":
+                    run_finished = True
+                    continue
+                _, node_name, node_update, acc_state = event
+                if node_name not in cards:
+                    continue
+                card = cards[node_name]
+                card["status"] = "done"
+                card["finished_at"] = time.monotonic()
+                if card["started_at"] is None:
+                    card["started_at"] = card["finished_at"]
+                card["output_summary"] = _summarize_output(node_name, node_update, acc_state)
+                card["sub_status"] = ""
+                redraw.add(node_name)
+
+                # Figure out what runs next (mirrors graph.py's edges, including the retry loop).
+                if node_name == "check_sufficiency":
+                    if node_update.get("sufficient") or node_update.get("retry_count", 0) >= CONFIG.max_retry_loops:
+                        next_key = "extract_paper_data"
+                    else:
+                        next_key = "generate_keywords"
+                        attempt = card["attempt"] + 1
+                        for reset_key in RETRY_RESET_KEYS:
+                            cards[reset_key] = _new_card_state()
+                            cards[reset_key]["attempt"] = attempt
+                            redraw.add(reset_key)
+                elif node_name == "analyze_gaps":
+                    next_key = None
+                else:
+                    next_key = NEXT_NODE.get(node_name)
+
+                if next_key:
+                    cards[next_key]["status"] = "running"
+                    cards[next_key]["started_at"] = time.monotonic()
+                    cards[next_key]["input_summary"] = _summarize_input(next_key, acc_state)
+                    redraw.add(next_key)
+
+            if redraw:
+                for key in redraw:
+                    _render_card(placeholders[key], key, cards[key])
+            if log_updated:
+                _draw_log_box()
+            time.sleep(0.15)
+
+        # final drain — a few log lines can land after "run_finished"
+        while True:
+            try:
+                st.session_state.log_lines.append(log_queue.get_nowait())
+            except queue.Empty:
+                break
+        _draw_log_box()
+
+        root_logger.removeHandler(handler)
+        root_logger.setLevel(prev_level)
+
+        if run_result["error"]:
+            running_key = next((k for k in NODE_ORDER if cards[k]["status"] == "running"), None)
+            if running_key:
+                cards[running_key]["status"] = "error"
+                cards[running_key]["finished_at"] = time.monotonic()
+                cards[running_key]["error"] = str(run_result["error"])
+                _render_card(placeholders[running_key], running_key, cards[running_key])
+            st.error(f"Agent run failed: {run_result['error']}")
+        else:
+            final_state = run_result["state"]
+            st.session_state.final_state = final_state
+
+            os.makedirs(CONFIG.output_dir, exist_ok=True)
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            with open(os.path.join(CONFIG.output_dir, f"{ts}_state.json"), "w", encoding="utf-8") as f:
+                json.dump(final_state, f, indent=2, default=str, ensure_ascii=False)
+
+# ---------------------------------------------------------------------------
+# Full raw log, persisted — the run above already showed this live; this keeps it visible (not
+# collapsed) after the run completes or after any unrelated rerun (e.g. moving a sidebar
+# slider), so "print everything" stays on screen rather than requiring an extra click.
+# ---------------------------------------------------------------------------
+if st.session_state.log_lines and not run_clicked:
+    st.divider()
+    st.subheader("Full run log (last run)")
+    with st.container(height=LOG_BOX_HEIGHT, border=True):
+        st.code("\n".join(st.session_state.log_lines), language=None)
+
+if st.session_state.log_lines:
+    st.download_button("Download run log (.txt)", data="\n".join(st.session_state.log_lines),
+                        file_name="agent_run_log.txt", mime="text/plain")
+
+# ---------------------------------------------------------------------------
+# Results
+# ---------------------------------------------------------------------------
+state = st.session_state.final_state
+if state:
+    papers = state.get("selected_papers", [])
+    st.subheader(f"Papers analyzed ({len(papers)} of {len(state.get('candidate_papers', []))} found)")
+    for p in papers:
+        authors = ", ".join(p.get("authors") or []) or "unknown authors"
+        st.markdown(f"- **{p.get('title')}** ({p.get('year', '?')}) — {authors} "
+                    f"· `{p.get('id')}` · similarity {p.get('similarity_score', 0):.2f}")
+
+    st.subheader("Comparison table")
+    st.markdown(state.get("comparison_table", "_(none)_"))
+
+    st.subheader("Trends across papers")
+    st.write(state.get("trend_summary", "_(none)_"))
+
+    st.subheader("Candidate research gaps")
+    gaps = state.get("gap_candidates", [])
+    if not gaps:
+        st.info("No gap candidates survived verification — try a broader topic or more papers.")
+    for gap in gaps:
+        with st.container(border=True):
+            color = CONFIDENCE_COLOR.get(gap.get("confidence_level"), "gray")
+            st.markdown(f"#### {gap['claim']}")
+            st.markdown(f":{color}[**{gap['confidence_level']} confidence** — {gap['confidence_score']}/100]")
+            st.write(gap.get("rationale", ""))
+            st.caption(f"Supporting papers: {', '.join(gap.get('supporting_paper_ids', []))}")
+            st.caption(f"Verifier notes: {gap.get('verifier_notes', '')}")
+
+    st.divider()
+    report_md = render_report(state)
+    st.download_button("Download full report (.md)", data=report_md,
+                        file_name="research_gap_report.md", mime="text/markdown")
