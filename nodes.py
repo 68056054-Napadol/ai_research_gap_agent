@@ -3,15 +3,23 @@ The 7 graph nodes — see architecture doc §2.2 for the rationale behind each o
 function takes the current AgentState and returns a dict of the fields it updates; LangGraph
 merges that into the running state (standard LangGraph node signature).
 """
+import datetime
+import json
 import logging
 import re
 import time
 
 import embeddings
+import links
 import llm_client
+import metrics
+import privacy
 import prompts
+import rag_store
+import tools
 from config import CONFIG
-from sources import search_all, REGISTRY, pdf_extract
+from contracts import GapProposalOutput, KeywordOutput, PaperExtractOutput, VerifierOutput
+from sources import search_all, pdf_extract, _dedupe
 from state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -40,6 +48,34 @@ def _quote_verified(quote: str, source_text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Node 0 — Input privacy check (LLM extraction + decision model)
+# ---------------------------------------------------------------------------
+def sanitize_input(state: AgentState) -> dict:
+    """Runs before anything else: the topic the user typed goes through regex + LLM entity
+    extraction, then the decision model (decision_model/sensitive_info.dmn.json) decides per
+    entity (entity_action) and for the whole input (input_action). Only the redacted topic is
+    kept in state."""
+    privacy.reset_run()
+    result = privacy.sanitize_topic(state["research_topic"])
+    d = result["decision"]
+    logger.info("Input decision: %s (rule %s) - %d entity decision(s)%s", d["action"], d["rule"],
+                len(result["records"]), f" - {d['message']}" if d.get("message") else "")
+    for r in result["records"]:
+        logger.info("  [privacy] %s %s role=%s by=%s conf=%.2f -> %s (rule %s)", r["type"], r["masked"],
+                    r["role"], r["detected_by"], r["confidence"], r["action"], r["rule"])
+    return {
+        "research_topic": result["topic"] if d["action"] != "REJECT" else "[REJECTED INPUT]",
+        "input_decision": d,
+        "privacy_log": result["records"],
+        "tool_trace": [],
+    }
+
+
+def route_after_input(state: AgentState) -> str:
+    return "reject" if state.get("input_decision", {}).get("action") == "REJECT" else "proceed"
+
+
+# ---------------------------------------------------------------------------
 # Node 1 — Topic Understanding & Keyword Generation
 # ---------------------------------------------------------------------------
 def generate_keywords(state: AgentState) -> dict:
@@ -52,9 +88,10 @@ def generate_keywords(state: AgentState) -> dict:
     else:
         logger.info("Generating search keywords for topic: %r", state["research_topic"])
 
-    prompt = prompts.KEYWORD_GEN_PROMPT.format(topic=state["research_topic"], retry_context=retry_context)
-    result = llm_client.call_json(prompt, tier="fast")
-    queries = result.get("queries", [state["research_topic"]])
+    prompt = prompts.KEYWORD_GEN_PROMPT.format(topic=privacy.strip_placeholders(state["research_topic"]),
+                                               retry_context=retry_context)
+    result = llm_client.call_json(prompt, tier="fast", schema=KeywordOutput, purpose="generate-search-queries")
+    queries = result["queries"]
     logger.info("Generated %d search queries: %s", len(queries), queries)
 
     return {
@@ -67,28 +104,49 @@ def generate_keywords(state: AgentState) -> dict:
 # Node 2 — Multi-Source Search
 # ---------------------------------------------------------------------------
 def search_sources(state: AgentState) -> dict:
-    logger.info("Searching %d source(s) [%s] for %d quer%s",
-                len(CONFIG.enabled_sources), ", ".join(CONFIG.enabled_sources),
-                len(state["search_queries"]), "y" if len(state["search_queries"]) == 1 else "ies")
-    all_papers = []
-    for query in state["search_queries"]:
-        papers = search_all(
-            query,
-            sources=list(CONFIG.enabled_sources),
-            year_from=state.get("year_from"),
-            year_to=state.get("year_to"),
-            limit_per_source=max(10, CONFIG.max_candidate_papers // len(state["search_queries"])),
-        )
-        logger.info("  query %r -> %d papers", query, len(papers))
-        all_papers.extend(papers)
+    """Search AGENT: the LLM decides which search_papers calls to make (query, source, year range,
+    limit) via real tool calling, sees each call's returned context, and adapts. The harness
+    (tools.SearchToolContext) validates every argument against contracts.SearchPapersArgs and
+    enforces policy (enabled sources, the user's year range, a call budget)."""
+    queries = state["search_queries"]
+    ctx = tools.SearchToolContext(year_from=state.get("year_from"), year_to=state.get("year_to"),
+                                  enabled_sources=CONFIG.enabled_sources)
+    logger.info("Search agent starting: %d suggested queries, sources=%s, budget=%d tool calls",
+                len(queries), ", ".join(ctx.enabled_sources), ctx.budget)
+    prompt = prompts.SEARCH_AGENT_PROMPT.format(
+        topic=privacy.strip_placeholders(state["research_topic"]), year_from=state.get("year_from") or "any",
+        year_to=state.get("year_to") or "any", sources=", ".join(ctx.enabled_sources) + " (or 'all')",
+        queries="\n".join(f"- {q}" for q in queries), budget=ctx.budget,
+    )
+    result = llm_client.run_tool_loop(prompts.SEARCH_AGENT_SYSTEM, prompt, tools.SEARCH_TOOLS, ctx.execute,
+                                      tier="fast", agent_name="search_agent",
+                                      trace_metadata={"budget": ctx.budget, "sources": ctx.enabled_sources})
+    trace = result.trace
+    used_fallback = False
+    if ctx.calls_made == 0:
+        # The model answered without ever calling the tool (some small local models do this).
+        # Run the suggested queries through the same tool executor so the run can continue, and
+        # label these trace entries as harness fallback - they were NOT chosen by the LLM.
+        used_fallback = True
+        logger.warning("Search agent made no successful tool calls - harness fallback: running suggested queries")
+        for q in queries:
+            text, entry = ctx.execute("search_papers", {"query": q, "source": "all",
+                                                         "limit": max(10, CONFIG.max_candidate_papers // max(len(queries), 1))})
+            trace.append({"agent": "harness_fallback", "step": 0, "tool_name": "search_papers",
+                          "arguments": {"query": q, "source": "all"}, "result_preview": text[:1500],
+                          "result_chars": len(text), **entry})
 
-    # dedupe across queries too, and cap to the candidate-pool budget (architecture doc §7.4)
-    from sources import _dedupe
-    deduped = _dedupe(all_papers)[: CONFIG.max_candidate_papers]
-    logger.info("Total: %d raw results -> %d after dedup (capped at %d)",
-                len(all_papers), len(deduped), CONFIG.max_candidate_papers)
-
-    return {"candidate_papers": deduped}
+    # accumulate across retry loops instead of throwing earlier finds away
+    merged = _dedupe((state.get("candidate_papers") or []) + ctx.papers)[: CONFIG.max_candidate_papers]
+    logger.info("Search agent done: %d tool call(s), %d unique papers this round, %d total candidates",
+                ctx.calls_made, len(ctx.papers), len(merged))
+    return {
+        "candidate_papers": merged,
+        "search_summary": result.final_text.strip(),
+        "search_used_fallback": used_fallback,
+        "tool_trace": (state.get("tool_trace") or []) + trace,
+        "privacy_log": (state.get("privacy_log") or []) + ctx.privacy_records,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -107,9 +165,9 @@ def filter_and_rank(state: AgentState) -> dict:
     # top CONFIG.llm_rerank_top_n from `above_threshold`, ask the LLM to judge true relevance
     # per-paper, and re-sort. Left as the highest-value TODO per the README's "what's next".
 
-    selected = above_threshold[: CONFIG.max_deep_analysis_papers]
-    logger.info("Selected top %d papers for deep analysis (budget: %d)",
-                len(selected), CONFIG.max_deep_analysis_papers)
+    budget = state.get("max_papers") or CONFIG.max_deep_analysis_papers   # CLI --max-papers / UI slider
+    selected = above_threshold[:budget]
+    logger.info("Selected top %d papers for deep analysis (budget: %d)", len(selected), budget)
     return {"ranked_papers": above_threshold, "selected_papers": selected}
 
 
@@ -119,9 +177,12 @@ def filter_and_rank(state: AgentState) -> dict:
 def check_sufficiency(state: AgentState) -> dict:
     retry_count = state.get("retry_count", 0)
     n_selected = len(state.get("selected_papers", []))
-    sufficient = n_selected >= CONFIG.min_papers_before_retry
+    # Live-run bug: with --max-papers 4 and MIN_PAPERS_BEFORE_RETRY=5 the check could never pass,
+    # so every run burned all retry loops. You can't need more papers than you're allowed to select.
+    need = min(CONFIG.min_papers_before_retry, state.get("max_papers") or CONFIG.max_deep_analysis_papers)
+    sufficient = n_selected >= need
     logger.info("Sufficiency check: %d selected papers (need >= %d) -> %s",
-                n_selected, CONFIG.min_papers_before_retry, "sufficient" if sufficient else "INSUFFICIENT")
+                n_selected, need, "sufficient" if sufficient else "INSUFFICIENT")
     return {"sufficient": sufficient, "retry_count": retry_count + (0 if sufficient else 1)}
 
 
@@ -150,13 +211,52 @@ ABSTRACT_CHAR_LIMIT = 4000
 FULL_TEXT_CHAR_LIMIT = 12000
 
 
+# What Node 5 asks the paper's own chunks for, instead of cutting the text at the first 12k chars
+# (which mostly kept intro + related work and dropped results/limitations near the end).
+EXTRACT_RETRIEVAL_QUERIES = {
+    "method": "proposed method approach model architecture",
+    "dataset": "datasets and experimental setup used for evaluation",
+    "results": "main results performance compared with baselines",
+    "limitations": "limitations weaknesses future work",
+}
+
+
+def _rag_view(store, paper: dict, full_text: str) -> str:
+    """Text shown to the extraction LLM for a full-text paper: its opening (title + abstract)
+    plus the chunks most relevant to each extraction field, retrieved from the knowledge base."""
+    parts, seen = [store.paper_opening(paper["id"], 2500)], set()
+    for field_name, query in EXTRACT_RETRIEVAL_QUERIES.items():
+        for hit in store.search(query, paper_ids=[paper["id"]], k=2):
+            if hit["chunk"] in seen or hit["text"][:200] in parts[0]:
+                continue
+            seen.add(hit["chunk"])
+            parts.append(f"[{hit['section']}]\n{hit['text']}")
+    return "\n\n".join(parts)[:FULL_TEXT_CHAR_LIMIT]
+
+
+def _extract_cache_key(prompt: str) -> str:
+    import hashlib
+    model = CONFIG.cloud_model_fast if CONFIG.llm_backend == "cloud" else CONFIG.local_model_fast
+    return hashlib.sha1(f"{model}\n{prompt}".encode("utf-8")).hexdigest()[:20]
+
+
 def extract_paper_data(state: AgentState) -> dict:
     total = len(state["selected_papers"])
     logger.info("Extracting structured data (method/dataset/results) from %d papers", total)
+    store = rag_store.get_store() if CONFIG.rag_enabled else None
     extracts = []
+    privacy_records = []
     for i, paper in enumerate(state["selected_papers"], 1):
         title = (paper.get("title") or "")[:80]
         full_text = paper.get("full_text")
+
+        # Knowledge base first (KM): a paper indexed with full text in an earlier run is reused -
+        # no PDF download, no conversion, no re-redaction.
+        if full_text is None and store is not None and store.indexed_kind(paper["id"]) == "full_text":
+            full_text = store.paper_text(paper["id"])
+            paper["full_text"] = full_text
+            metrics.inc("rag_full_text_reused")
+            logger.info("  [%d/%d] Full text reused from knowledge base (%d chars): %s", i, total, len(full_text), title)
 
         # Fetch + convert the open-access PDF to Markdown if we don't already have full text for
         # this paper (see sources/pdf_extract.py for why Markdown, not raw PDF text). Off switch:
@@ -168,6 +268,12 @@ def extract_paper_data(state: AgentState) -> dict:
             pdf_start = time.monotonic()
             full_text = pdf_extract.fetch_and_convert(paper["oa_pdf_url"], paper["id"])
             if full_text:
+                # Privacy: author names / emails / affiliations are redacted BEFORE the text reaches
+                # the extraction LLM, the verifier tool, the knowledge base, the UI or state.json -
+                # and the on-disk PDF cache is overwritten with the redacted version.
+                full_text, recs = privacy.scrub_full_text(full_text, paper["id"])
+                privacy_records.extend(recs)
+                pdf_extract.overwrite_cache(paper["id"], full_text)
                 paper["full_text"] = full_text  # cache on the paper dict for the rest of this run
                 logger.info("  [%d/%d] Got PDF full text (%d chars, %.1fs)",
                             i, total, len(full_text), time.monotonic() - pdf_start)
@@ -180,19 +286,38 @@ def extract_paper_data(state: AgentState) -> dict:
             logger.info("  [%d/%d] SKIPPED (no abstract or text available): %s", i, total, title)
             continue
 
+        # Index into the knowledge base (abstract-only papers too, so search_corpus covers them).
+        if store is not None:
+            try:
+                store.index_paper(paper, text, "full_text" if full_text else "abstract")
+            except Exception as e:   # an embedding hiccup must not cost us the paper
+                logger.warning("  [%d/%d] RAG indexing failed (%s) - using plain truncation", i, total, e)
+
         logger.info("  [%d/%d] Extracting (%s): %s", i, total,
                     "full text" if full_text else "abstract only", title)
         paper_start = time.monotonic()
-        char_limit = FULL_TEXT_CHAR_LIMIT if full_text else ABSTRACT_CHAR_LIMIT
-        text_shown_to_llm = text[:char_limit]
+        if full_text and store is not None and store.indexed_kind(paper["id"]) == "full_text":
+            text_shown_to_llm = _rag_view(store, paper, full_text)
+        else:
+            text_shown_to_llm = text[:FULL_TEXT_CHAR_LIMIT if full_text else ABSTRACT_CHAR_LIMIT]
         prompt = prompts.EXTRACT_PROMPT.format(title=paper.get("title", ""), year=paper.get("year", "?"), text=text_shown_to_llm)
-        try:
-            result = llm_client.call_json(prompt, tier="fast")
-        except llm_client.LLMError as e:
-            logger.warning("  [%d/%d] Extraction FAILED for %s (%.1fs): %s",
-                            i, total, paper["id"], time.monotonic() - paper_start, e)
-            continue
 
+        cache_key = _extract_cache_key(prompt)
+        result = store.get_extract(paper["id"], cache_key) if (store is not None and CONFIG.rag_reuse_extracts) else None
+        if result is not None:
+            metrics.inc("extract_cache_hits")
+            logger.info("  [%d/%d] Extraction reused from knowledge base (same text, prompt and model)", i, total)
+        else:
+            try:
+                result = llm_client.call_json(prompt, tier="fast", schema=PaperExtractOutput, purpose="extract-paper-facts")
+            except llm_client.LLMError as e:
+                logger.warning("  [%d/%d] Extraction FAILED for %s (%.1fs): %s",
+                                i, total, paper["id"], time.monotonic() - paper_start, e)
+                continue
+            if store is not None:
+                store.put_extract(paper["id"], cache_key, result)
+
+        result = dict(result)
         result["paper_id"] = paper["id"]
         result["extraction_confidence"] = "full_text" if full_text else "abstract_only"
 
@@ -217,7 +342,11 @@ def extract_paper_data(state: AgentState) -> dict:
         logger.info("  [%d/%d] Done (%.1fs): %s", i, total, time.monotonic() - paper_start, title)
 
     logger.info("Extraction complete: %d/%d papers successfully extracted", len(extracts), total)
-    return {"paper_extracts": extracts}
+    out = {"paper_extracts": extracts, "selected_papers": state["selected_papers"],
+           "privacy_log": (state.get("privacy_log") or []) + privacy_records}
+    if store is not None:
+        out["knowledge_base"] = store.stats()
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -243,15 +372,69 @@ def compare_papers(state: AgentState) -> dict:
 
     logger.info("Calling strong-tier LLM to synthesize trends across papers...")
     prompt = prompts.COMPARE_PROMPT.format(topic=state["research_topic"], comparison_table=table)
-    trend_summary = llm_client.call(prompt, tier="strong")
+    trend_summary = llm_client.call(prompt, tier="strong", purpose="synthesize-trends")
+    # cheap redaction now (regex + this run's author list) so no intermediate view - UI card, log -
+    # ever shows a name; the LLM-based pass on the final answer happens in privacy_guard
+    trend_summary, recs = privacy.sanitize(trend_summary, "final_answer", "trend_summary(draft)", use_llm=False)
     logger.info("Trend synthesis complete (%d characters)", len(trend_summary))
 
-    return {"comparison_table": table, "trend_summary": trend_summary}
+    return {"comparison_table": table, "trend_summary": trend_summary,
+            "privacy_log": (state.get("privacy_log") or []) + recs}
 
 
 # ---------------------------------------------------------------------------
 # Node 7 — Gap Analysis + Verifier -> confidence-scored gap candidates
 # ---------------------------------------------------------------------------
+def verifier_decision(facts: dict, counterexample_ids_seen: set) -> tuple:
+    """Deterministic verdict from the verifier's reported facts (the LLM extracts, code decides -
+    same pattern as the privacy decision model). Returns (supported, reason)."""
+    if not facts.get("cited_papers_relevant"):
+        return False, "cited papers do not concern the claim (topic or qualifier)"
+    if facts.get("counterexample_found"):
+        cid = facts.get("counterexample_paper_id")
+        if cid and cid not in counterexample_ids_seen:
+            # the model named a counterexample paper the corpus search never returned - don't trust it
+            return True, f"counterexample {cid} was not among the passages search_corpus returned - ignored"
+        return False, f"counterexample found in the corpus ({cid or 'id not given'})"
+    if facts.get("overstated"):
+        return False, "claim is overstated relative to the source text"
+    return True, "cited papers relevant, no counterexample in the corpus, not overstated"
+
+
+def _verify_with_tools(gap: dict, supporting_ids: list, extracts_by_id: dict, selected_papers: list):
+    """Verifier AGENT: reads the cited papers' source text through the get_paper_text tool, then
+    returns a contract-validated verdict. Returns (verdict_dict, trace, read_ids)."""
+    store = rag_store.get_store() if CONFIG.rag_enabled else None
+    ctx = tools.VerifierToolContext(selected_papers, store=store)
+    toolset = tools.VERIFIER_TOOLS if store is not None else tools.VERIFIER_TOOLS_NO_RAG
+    cited_data = "\n".join(f"- {pid}: {json.dumps({k: v for k, v in extracts_by_id[pid].items() if k != 'paper_id'}, ensure_ascii=False)}"
+                           for pid in supporting_ids)
+    prompt = prompts.VERIFIER_PROMPT.format(claim=gap["claim"], rationale=gap.get("rationale", ""),
+                                            cited_ids=", ".join(supporting_ids), cited_paper_data=cited_data)
+    loop = llm_client.run_tool_loop(prompts.VERIFIER_SYSTEM, prompt, toolset, ctx.execute,
+                                    tier="strong", agent_name="verifier_agent",
+                                    trace_metadata={"claim": gap["claim"][:300], "cited_paper_ids": supporting_ids})
+    try:
+        verdict = llm_client.parse_with_contract(loop.final_text, VerifierOutput)
+    except Exception as e:
+        # The final answer of a tool loop can't use JSON prefill; if it broke the contract, ask once
+        # more (no tools) with the tool contexts it already gathered pasted in.
+        logger.warning("  Verifier final answer broke the contract (%s) - re-asking for JSON", type(e).__name__)
+        metrics.inc("contract_violations")
+        contexts = "\n".join(t["result_preview"] for t in loop.trace if t.get("ok"))
+        verdict = llm_client.call_json(prompt + "\n\nSource text already retrieved with get_paper_text:\n"
+                                       + contexts, tier="strong", schema=VerifierOutput, purpose="repair-verifier-answer")
+    seen = {pid for t in loop.trace if t.get("tool_name") == "search_corpus" for pid in t.get("paper_ids_hit", [])}
+    llm_opinion = verdict.get("supported")
+    verdict["supported"], verdict["decision_reason"] = verifier_decision(verdict, seen)
+    verdict["llm_opinion"] = llm_opinion
+    if llm_opinion is not None and llm_opinion != verdict["supported"]:
+        metrics.inc("verifier_llm_disagreed_with_rule")
+        logger.info("    verifier facts -> supported=%s (%s); the model's own opinion was %s",
+                    verdict["supported"], verdict["decision_reason"], llm_opinion)
+    return verdict, loop.trace, sorted(ctx.read_ids), list(ctx.corpus_searches)
+
+
 def analyze_gaps(state: AgentState) -> dict:
     logger.info("Proposing candidate research gaps from the comparison table + trends...")
     prompt = prompts.GAP_ANALYSIS_PROMPT.format(
@@ -259,64 +442,133 @@ def analyze_gaps(state: AgentState) -> dict:
         comparison_table=state["comparison_table"],
         trend_summary=state["trend_summary"],
     )
-    proposal = llm_client.call_json(prompt, tier="strong")
-    raw_candidates = proposal.get("gap_candidates", [])
+    proposal = llm_client.call_json(prompt, tier="strong", schema=GapProposalOutput, purpose="propose-gaps")
+    raw_candidates = proposal["gap_candidates"]
     logger.info("Proposer returned %d candidate gap(s)", len(raw_candidates))
+    early_privacy = []
+    for gap in raw_candidates:   # same cheap redaction as above, before claims hit the log/UI
+        for k in ("claim", "rationale"):
+            gap[k], recs = privacy.sanitize(gap.get(k) or "", "final_answer", f"gap.{k}(draft)", use_llm=False)
+            early_privacy += recs
 
     extracts_by_id = {ex["paper_id"]: ex for ex in state["paper_extracts"]}
     papers_by_id = {p["id"]: p for p in state["selected_papers"]}
+    trace = list(state.get("tool_trace") or [])
+    current_year = datetime.date.today().year
     verified = []
     for i, gap in enumerate(raw_candidates, 1):
-        supporting_ids = gap.get("supporting_paper_ids", [])
         claim_preview = (gap.get("claim") or "")[:70]
+        # Bug fix: only ids that are really among the extracted papers count as evidence. Before,
+        # a made-up id passed the ">= 2 supporting papers" rule and earned evidence points.
+        cited = list(dict.fromkeys(gap.get("supporting_paper_ids", [])))
+        supporting_ids = [pid for pid in cited if pid in extracts_by_id]
+        dropped = [pid for pid in cited if pid not in extracts_by_id]
+        if dropped:
+            metrics.inc("gap_ids_hallucinated", len(dropped))
+            logger.warning("  [%d/%d] dropped %d cited id(s) not among analyzed papers: %s",
+                           i, len(raw_candidates), len(dropped), dropped)
         if len(supporting_ids) < CONFIG.min_supporting_papers_for_gap:
-            logger.info("  [%d/%d] REJECTED (only %d supporting paper(s), need >= %d): %r",
+            logger.info("  [%d/%d] REJECTED (only %d valid supporting paper(s), need >= %d): %r",
                         i, len(raw_candidates), len(supporting_ids), CONFIG.min_supporting_papers_for_gap, claim_preview)
             continue  # structural rule from architecture doc §7.3 — reject weakly-evidenced gaps
 
-        logger.info("  [%d/%d] Verifying (%d supporting papers): %r",
+        logger.info("  [%d/%d] Verifying with tools (%d supporting papers): %r",
                     i, len(raw_candidates), len(supporting_ids), claim_preview)
-        cited_data = "\n".join(
-            f"- {pid}: {extracts_by_id.get(pid, {})}" for pid in supporting_ids
-        )
-        verifier_prompt = prompts.VERIFIER_PROMPT.format(
-            claim=gap["claim"], rationale=gap.get("rationale", ""), cited_paper_data=cited_data,
-        )
         try:
-            verdict = llm_client.call_json(verifier_prompt, tier="strong")
+            verdict, vtrace, read_ids, corpus_searches = _verify_with_tools(
+                gap, supporting_ids, extracts_by_id, state["selected_papers"])
+            for t in vtrace:
+                t["gap_index"] = i
+            trace += vtrace
         except llm_client.LLMError as e:
-            logger.warning("  [%d/%d] Verifier call failed, treating as unsupported: %s", i, len(raw_candidates), e)
-            verdict = {"supported": False, "notes": "verifier call failed", "unsupported_aspects": "unknown"}
+            logger.warning("  [%d/%d] Verifier failed, treating as unsupported: %s", i, len(raw_candidates), e)
+            verdict = {"supported": False, "notes": "verifier call failed", "unsupported_aspects": "unknown",
+                       "decision_reason": "verifier call failed"}
+            read_ids, corpus_searches = [], []
+        coverage = len([r for r in read_ids if r in supporting_ids]) / len(supporting_ids)
 
         # --- confidence scoring formula (architecture doc §7.3) ---
-        # A simple, explainable composite — tune the weights once you have real outputs to
-        # calibrate against (architecture doc §8, "confidence calibration" eval step).
-        # TODO(Member C): this is a first-pass heuristic, not a validated formula. Before the
-        # demo, run the calibration check in the architecture doc §8 and adjust weights/cutoffs.
+        # TODO(Member C): first-pass heuristic - calibrate with evaluation/eval_plan.md §4.
         evidence_count_score = min(len(supporting_ids) / 4, 1.0) * 40       # up to 40 pts
 
         cited_years = [papers_by_id.get(pid, {}).get("year") for pid in supporting_ids]
         cited_years = [y for y in cited_years if isinstance(y, int)]
         most_recent = max(cited_years) if cited_years else None
-        current_year_estimate = 2026
         if most_recent is None:
             recency_score = 10  # no year data at all -> can't claim it's recent
         else:
-            age = max(current_year_estimate - most_recent, 0)
+            age = max(current_year - most_recent, 0)
             recency_score = max(30 - age * 5, 5)  # up to 30 pts, decays with age of newest evidence
 
-        verifier_score = 30 if verdict.get("supported") else 5               # up to 30 pts
+        # up to 30 pts: full marks only if the verifier said "supported" AND actually read the
+        # source text of at least half the cited papers via the tool
+        if verdict.get("supported"):
+            verifier_score = 30 if coverage >= 0.5 else 15
+        else:
+            verifier_score = 5
         confidence_score = evidence_count_score + recency_score + verifier_score
         confidence_level = "High" if confidence_score >= 75 else "Medium" if confidence_score >= 45 else "Low"
-        logger.info("    -> verdict supported=%s, confidence=%s (%.1f/100)",
-                    verdict.get("supported"), confidence_level, confidence_score)
+        logger.info("    -> verdict supported=%s, read %d/%d sources, confidence=%s (%.1f/100)",
+                    verdict.get("supported"), len(read_ids), len(supporting_ids), confidence_level, confidence_score)
 
         verified.append({
-            **gap,
+            "claim": gap["claim"],
+            "supporting_paper_ids": supporting_ids,
+            "supporting_papers": links.supporting_papers(supporting_ids, papers_by_id),
+            "rationale": gap.get("rationale", ""),
             "confidence_score": round(confidence_score, 1),
             "confidence_level": confidence_level,
+            "verifier_supported": bool(verdict.get("supported")),
+            "verifier_facts": {k: verdict.get(k) for k in ("cited_papers_relevant", "counterexample_found",
+                                                          "counterexample_paper_id", "overstated")},
+            "verifier_decision_reason": verdict.get("decision_reason", ""),
             "verifier_notes": verdict.get("notes", ""),
+            "unsupported_aspects": verdict.get("unsupported_aspects", ""),
+            "evidence_read_ids": read_ids,
+            "evidence_coverage": round(coverage, 2),
+            "counterexample_searches": corpus_searches,
+            "dropped_ids": dropped,
         })
 
     logger.info("Gap analysis complete: %d/%d candidates passed verification", len(verified), len(raw_candidates))
-    return {"gap_candidates": verified}
+    return {"gap_candidates": verified, "tool_trace": trace,
+            "privacy_log": (state.get("privacy_log") or []) + early_privacy}
+
+
+# ---------------------------------------------------------------------------
+# Node 8 — Privacy guard on the final answer (LLM extraction + decision model)
+# ---------------------------------------------------------------------------
+def privacy_guard(state: AgentState) -> dict:
+    """Last line of defence: everything the user is about to read (trend summary, gap claims,
+    rationales, verifier notes) goes through the same detectors + decision model with
+    channel=final_answer. One LLM extraction call over the combined text, then each field is
+    redacted with the decided entities."""
+    fields = [("trend_summary", state.get("trend_summary") or "")]
+    for i, g in enumerate(state.get("gap_candidates") or []):
+        for k in ("claim", "rationale", "verifier_notes", "unsupported_aspects"):
+            fields.append((f"gap{i}.{k}", g.get(k) or ""))
+    combined = "\n\n".join(f"[{k}] {v}" for k, v in fields if v)
+    llm_ents = privacy.llm_detect(combined, "final_answer") if combined.strip() else []
+
+    records, out, total = [], {}, 0
+    for key, text in fields:
+        ents = privacy.regex_detect(text) + privacy.metadata_detect(text) + [e for e in llm_ents if e["text"] in text]
+        new_text, recs = privacy.decide_and_redact(text, ents, "final_answer", key)
+        out[key] = new_text
+        records += recs
+        total += sum(r["occurrences"] for r in recs if r["action"] == "REDACT")
+
+    gaps = []
+    for i, g in enumerate(state.get("gap_candidates") or []):
+        g = dict(g)
+        for k in ("claim", "rationale", "verifier_notes", "unsupported_aspects"):
+            g[k] = out.get(f"gap{i}.{k}", g.get(k, ""))
+        gaps.append(g)
+    logger.info("Privacy guard on final answer: %d decision(s), %d redaction(s)", len(records), total)
+    return {
+        "trend_summary": out.get("trend_summary", state.get("trend_summary", "")),
+        "gap_candidates": gaps,
+        "final_answer_redactions": total,
+        "privacy_log": (state.get("privacy_log") or []) + records,
+        "run_metrics": metrics.snapshot(),
+    }

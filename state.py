@@ -12,12 +12,13 @@ class Paper(TypedDict, total=False):
     id: str                # source-qualified id, e.g. "semantic_scholar:abcd1234"
     source: str
     title: str
-    authors: list
+    n_authors: int         # author NAMES are never stored (privacy.scrub_paper) - only the count
     year: Optional[int]
     abstract: str
     doi: Optional[str]
     oa_pdf_url: Optional[str]
     citation_count: Optional[int]
+    url: Optional[str]                    # built by links.paper_url from DOI/source id, never by the LLM
     similarity_score: Optional[float]     # set by Node 3
     full_text: Optional[str]              # set by Node 5, if OA copy was found
 
@@ -40,25 +41,36 @@ class PaperExtract(TypedDict, total=False):
 class GapCandidate(TypedDict, total=False):
     claim: str
     supporting_paper_ids: list
+    supporting_papers: list    # [{id, title, year, url}] - links.supporting_papers, only real analyzed papers
     rationale: str
     confidence_level: str      # "Low" | "Medium" | "High"
     confidence_score: float    # 0-100, see nodes.analyze_gaps
     verifier_notes: str
+    unsupported_aspects: str
+    evidence_read_ids: list    # cited papers the verifier actually read via get_paper_text
+    evidence_coverage: float   # len(evidence_read_ids) / len(supporting_paper_ids)
+    counterexample_searches: list  # search_corpus queries the verifier ran before accepting the claim
+    dropped_ids: list          # cited ids that do not exist among the analyzed papers (hallucinated)
 
 
 class AgentState(TypedDict, total=False):
-    # --- input ---
+    # --- input (research_topic is the REDACTED topic - the raw input is never stored) ---
     research_topic: str
     year_from: Optional[int]
     year_to: Optional[int]
     max_papers: int
 
+    # --- Node 0: sanitize_input (decision model) ---
+    input_decision: dict        # {action: PROCEED|PROCEED_REDACTED|REJECT, message, rule, why}
+
     # --- Node 1 ---
     search_queries: list        # list[str]
     prior_queries_tried: list   # accumulates across retry loops
 
-    # --- Node 2 ---
-    candidate_papers: list      # list[Paper]
+    # --- Node 2: search agent (LLM tool calling) ---
+    candidate_papers: list      # list[Paper], accumulated across retry loops
+    search_summary: str         # the search agent's own final message
+    search_used_fallback: bool  # True if the model made no tool calls and the harness searched for it
 
     # --- Node 3 ---
     ranked_papers: list         # list[Paper], sorted by similarity_score desc
@@ -70,6 +82,7 @@ class AgentState(TypedDict, total=False):
 
     # --- Node 5 ---
     paper_extracts: list        # list[PaperExtract]
+    knowledge_base: dict        # rag_store stats after this run (papers, chunks, cached extracts)
 
     # --- Node 6 ---
     comparison_table: str       # markdown table, built from paper_extracts
@@ -77,6 +90,14 @@ class AgentState(TypedDict, total=False):
 
     # --- Node 7 ---
     gap_candidates: list        # list[GapCandidate]
+
+    # --- Node 8: privacy_guard on the final answer ---
+    final_answer_redactions: int
+
+    # --- cross-cutting, accumulated by several nodes ---
+    tool_trace: list            # every tool call: agent, tool_name, arguments, returned context
+    privacy_log: list           # every decision-model decision (masked, never the original text)
+    run_metrics: dict           # metrics.snapshot() at the end of the run
 
     # --- final ---
     report_markdown: str

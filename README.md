@@ -33,22 +33,33 @@ that tuning is the team's ongoing work (see "What to build next" at the bottom, 
 12. [Troubleshooting](#troubleshooting)
 13. [Project layout](#project-layout)
 14. [Run the MCP server standalone](#run-the-mcp-server-standalone)
-15. [What to build next](#what-to-build-next)
+15. [Tool calling (the agent harness)](#tool-calling-the-agent-harness)
+16. [Privacy: LLM extraction + decision model](#privacy-llm-extraction--decision-model)
+17. [Contracts and deterministic sampling](#contracts-and-deterministic-sampling)
+18. [Evaluation scripts and offline tests](#evaluation-scripts-and-offline-tests)
+19. [RAG knowledge base (KM)](#rag-knowledge-base-km)
+20. [Paper links in the answer](#paper-links-in-the-answer)
+21. [Tracing with Langfuse + outbound contract](#tracing-with-langfuse--outbound-contract)
+22. [What to build next](#what-to-build-next)
 
 ## Architecture, in brief
 
-One LangGraph agent, seven nodes in sequence, with a single conditional retry loop. Full
-rationale for every design choice is in the docx (§1–§9); this is just the map:
+One LangGraph graph, nine nodes, two conditional edges, and two **tool-calling agents** inside it
+(node 2 and node 7 — the LLM itself chooses tool name + arguments, see
+[Tool calling](#tool-calling-the-agent-harness)). Full rationale for the original seven nodes is in
+the docx (§1–§9); this is just the map:
 
 | # | Node (`nodes.py`) | What it does |
 |---|---|---|
+| 0 | `sanitize_input` | Privacy check on the typed topic: regex + LLM entity extraction, then the **decision model** decides REDACT/KEEP per entity and PROCEED / PROCEED_REDACTED / REJECT for the input (rejected → END) |
 | 1 | `generate_keywords` | Turns the topic into 3–5 varied search queries (LLM, "fast" tier) |
-| 2 | `search_sources` | Queries every enabled source in parallel-ish (semantic_scholar / arxiv / openalex), dedupes across queries and sources |
+| 2 | `search_sources` | **Search agent**: the LLM calls the `search_papers` tool (query, source, year range, limit) as many times as it decides, sees each result, adapts; candidates accumulate across retry loops |
 | 3 | `filter_and_rank` | Ranks candidates by embedding cosine-similarity to the topic; keeps the top N above a threshold |
 | 4 | `check_sufficiency` | No LLM call — if too few papers passed the threshold, loops back to node 1 with feedback (capped at `MAX_RETRY_LOOPS`) |
 | 5 | `extract_paper_data` | Per paper: fetches the open-access PDF and converts it to Markdown if available (else uses the abstract), then extracts method/dataset/findings/limitations/metrics (LLM, "fast" tier) |
 | 6 | `compare_papers` | Builds a comparison table across all extracted papers, then synthesizes cross-paper trends (LLM, "strong" tier) |
-| 7 | `analyze_gaps` | Proposes 2–4 candidate Research Gaps grounded in the table, then a separate verifier pass fact-checks each one and assigns a confidence score (LLM, "strong" tier, twice) |
+| 7 | `analyze_gaps` | Proposes 2–4 candidate Research Gaps grounded in the table, drops cited ids that don't exist, then a **verifier agent** reads each cited paper's source text through the `get_paper_text` tool and returns a contract-validated verdict → confidence score |
+| 8 | `privacy_guard` | Privacy check on the **final answer** (trend summary + gaps): regex + author list + LLM extraction → decision model → redaction |
 
 The "fast" vs "strong" model tiers, the hybrid cloud/local backend, the confidence-scoring
 formula, and the evaluation methodology are all covered in depth in the docx — this README is
@@ -68,9 +79,9 @@ pattern, but nodes only touch what they need).
 - Example: `research_topic="gold trading"` → `search_queries=["gold trading market dynamics", "gold futures pricing", "central bank gold reserves", ...]`
 
 **2. `search_sources`**
-- Reads: `search_queries` (list[str]); `year_from`/`year_to`; `CONFIG.enabled_sources`
-- Calls: no LLM — pure tool orchestration (`sources.search_all`, one call per query per enabled source)
-- Writes: `candidate_papers` (list of `Paper` dicts — `id`, `source`, `title`, `authors`, `year`, `abstract`, `doi`, `oa_pdf_url`, `citation_count` — deduped by DOI/title, capped at `MAX_CANDIDATE_PAPERS`)
+- Reads: `search_queries` (list[str], as suggestions); `year_from`/`year_to`; `CONFIG.enabled_sources`; existing `candidate_papers` (on a retry)
+- Calls: **tool-calling loop** (`llm_client.run_tool_loop`, tier `fast`, `SEARCH_AGENT_PROMPT`) — the LLM issues `search_papers(query, source, year_from, year_to, limit)` calls; each is validated (`contracts.SearchPapersArgs`), policy-checked, executed and its result returned to the LLM as context. Every returned paper goes through `privacy.scrub_paper` (author names dropped, names in title/abstract redacted)
+- Writes: `candidate_papers` (list of `Paper` dicts — `id`, `source`, `title`, `n_authors`, `year`, `abstract`, `doi`, `oa_pdf_url`, `citation_count` — deduped, accumulated across retries, capped at `MAX_CANDIDATE_PAPERS`); `search_summary`; `search_used_fallback`; appends to `tool_trace` and `privacy_log`
 
 **3. `filter_and_rank`**
 - Reads: `candidate_papers`; `research_topic`
@@ -159,8 +170,13 @@ either check independently — a claim can be well-reasoned from an extraction w
 verify, or perfectly verified but still overclaimed at the gap-analysis step — and both signals
 are visible to the user rather than collapsed into one score.
 
-**What's still not done, if you want to go further:** node 7's verifier itself still only ever
-sees `paper_extracts`, never the original source text. **Source-grounded verification** — giving
+**Now done — source-grounded verification:** the verifier is a tool-calling agent. It is given
+the extracted summaries *and* the `get_paper_text` tool, is told to read every cited paper's
+source text before deciding, and its confidence score only gets full verifier points if it really
+read at least half of the cited sources (`evidence_coverage`, shown next to every gap). Cited ids
+that are not among the analyzed papers are dropped before verification (`dropped_ids`) — they
+used to count as evidence. The original note, kept for context: node 7's verifier used to only
+see `paper_extracts`, never the original source text. **Source-grounded verification** — giving
 the verifier the actual abstract/full text for each cited paper, not just its summary — would let
 it catch reasoning drift introduced *during* gap proposal against the real source, the same way
 extraction-quote grounding now catches drift introduced during extraction. It's a heavier lift
@@ -382,9 +398,10 @@ to its abstract, same as before this feature existed — this never aborts a run
 
 ## Testing and verifying your setup
 
-There's no automated test suite in this scaffold (a course-scope call — see "What to build
-next" if you want to add one), so "testing" here means two different things: **confirming your
-install works**, and **judging whether the agent's actual output is good**.
+Run `python -m pytest -q tests` first: 23 offline tests (fictional fake papers + a scripted LLM,
+no network or API key) covering tool calling, contracts, the decision model and privacy. Beyond
+that, "testing" means two things: **confirming your install works**, and **judging whether the
+agent's actual output is good**.
 
 ### 1. Quick smoke test (do this right after installing)
 
@@ -394,8 +411,8 @@ From `ai_research_gap_agent/`, with the virtual environment active:
 python main.py --topic "few-shot named entity recognition" --max-papers 10 --verbose
 ```
 
-A working install prints progress through all 7 pipeline stages (query generation → search →
-ranking → sufficiency check → extraction → comparison → gap analysis) and ends with a `Done.`
+A working install prints progress through all pipeline stages (input privacy check → query generation →
+search agent → ranking → sufficiency check → extraction → comparison → gap analysis → privacy guard) and ends with a `Done.`
 line naming the two output files. If it fails, the `--verbose` output plus
 [Troubleshooting](#troubleshooting) below should point at the cause — the error is almost always
 either "no LLM backend configured" (§[Choosing a model backend](#choosing-a-model-backend)) or a
@@ -447,8 +464,18 @@ llm_client.py         # hybrid cloud/local LLM wrapper (single call()/call_json(
 embeddings.py          # local embedding + cosine-similarity ranking
 state.py               # the shared state schema (TypedDict) that flows through the graph
 prompts.py              # every LLM prompt template, kept in one place for easy iteration
-nodes.py                 # the 7 graph nodes (see "Architecture, in brief" above)
-graph.py                  # wires nodes.py into a LangGraph StateGraph with the retry loop
+nodes.py                 # the 9 graph nodes (see "Architecture, in brief" above)
+graph.py                  # wires nodes.py into a LangGraph StateGraph (input gate + retry loop)
+tools.py                  # tool definitions + executors (search_papers, get_paper_text, search_paper_chunks, search_corpus)
+rag_store.py              # persistent RAG knowledge base: section chunking, SQLite+numpy store, extraction cache
+links.py                  # paper links from DOI/arXiv/OpenAlex/S2 metadata (never from the LLM)
+tracing.py                # optional Langfuse tracing (no-op without keys)
+outbound.py               # outbound contract: no PII in traces, saved state or reports
+contracts.py              # pydantic contracts for every LLM output and tool argument
+privacy.py                # regex / metadata / LLM detectors + redaction
+decision_model/           # sensitive_info.dmn.json decision tables + evaluator
+metrics.py                # per-run counters (contracts, tool calls, tokens)
+tests/                    # offline tests with fictional fake papers + scripted LLM
 logging_utils.py          # shared logging setup used by both the CLI (--verbose) and the web UI
 sources/
   semantic_scholar.py      # search_papers / get_paper / get_full_text
@@ -459,6 +486,8 @@ app.py                        # Streamlit web UI
 mcp_server.py                  # exposes sources/* as MCP tools
 main.py                         # CLI entrypoint
 evaluation/eval_plan.md          # the evaluation methodology worksheet (see docx §8)
+evaluation/consistency_test.py   # same question N times -> similarity of answers
+evaluation/compare_models.py     # open-source (Ollama) vs commercial (Claude) on the same topics
 ```
 
 ## Run the MCP server standalone
@@ -472,6 +501,173 @@ python mcp_server.py
 
 Then add it to your MCP client config (see the MCP docs for your client) pointing at this
 command. Useful for debugging a connector by hand before trusting the agent to call it.
+
+## Tool calling (the agent harness)
+
+`llm_client.run_tool_loop()` is a native tool-use loop for both backends — Anthropic Messages API
+`tools=[...]` with `tool_use`/`tool_result` blocks, and Ollama `/api/chat` `tools=[...]` with
+`message.tool_calls`. Tools are defined in `tools.py`; their JSON schemas are generated from the
+argument contracts in `contracts.py`.
+
+| Agent | Tool | Arguments the LLM chooses | Context returned to the LLM |
+|---|---|---|---|
+| search agent (node 2) | `search_papers` | `query`, `source` (semantic_scholar / arxiv / openalex / all), `year_from`, `year_to`, `limit` | ids, titles, years, citation counts, has_pdf, how many new papers, calls left |
+| verifier agent (node 7) | `get_paper_text` | `paper_id`, `max_chars` | the paper's opening text (full-text excerpt or abstract), already privacy-redacted |
+| verifier agent (node 7) | `search_paper_chunks` | `paper_id`, `query`, `k` | the k passages of that paper most relevant to the query, with their section (RAG) |
+| verifier agent (node 7) | `search_corpus` | `query`, `k`, `scope` (this_run / knowledge_base) | passages across all analyzed papers (or everything stored) — used to look for counterexamples to "nobody has done X" claims |
+
+The harness, not the LLM, enforces policy on every call: arguments must pass the contract (a bad
+call returns an error the LLM can read and fix), only sources enabled in the sidebar are allowed,
+years are clamped to the user's range, and there is a call budget (`MAX_SEARCH_TOOL_CALLS`).
+If a model never calls a tool (some small local models), the harness runs the suggested queries
+itself and labels those entries `harness_fallback` — so the trace never pretends the LLM chose them.
+
+**Where to point during the demo** (web UI, after a run):
+- **🔧 Tool calls — context returned from tools**: one row per call (agent, tool name, arguments);
+  expand a row to see the exact JSON context that went back to the LLM.
+- **✅ Final answer — candidate research gaps**: the system's answer; each gap shows how many of its
+  cited sources the verifier read via the tool.
+- The live log shows the same thing as `TOOL CALL search_papers({...})` / `TOOL RESULT ...` lines.
+
+## Privacy: LLM extraction + decision model
+
+The LLM only **extracts** candidate sensitive entities (`prompts.SENSITIVE_EXTRACT_PROMPT`,
+validated by `contracts.SensitiveEntitiesOutput`): text, type (PERSON, EMAIL, PHONE, ID_NUMBER,
+ADDRESS, ORGANIZATION), role (author, cited_author, subject_person, eponym, affiliation…) and
+confidence. Two non-LLM detectors run alongside it: regex (emails, phones, 13-digit IDs,
+"Surname et al." citations) and metadata (the paper's own author list from the source API, kept
+in memory only). The **decision model** (`decision_model/sensitive_info.dmn.json`, evaluated by
+`decision_model/__init__.py`, hit policy FIRST) then **decides**:
+
+- table `entity_action` — per entity, REDACT (with a placeholder like `[AUTHOR]`) or KEEP. E.g.
+  rule R2 keeps an *eponym* ("Kalman" in "Kalman filter" is vocabulary, not a person), rule R5 uses
+  a lower confidence bar for what the user typed than rule R6 does for paper text.
+- table `input_action` — for the topic: PROCEED, PROCEED_REDACTED (person removed, research part
+  kept) or REJECT (nothing but a person lookup left, e.g. "งานวิจัยของ ดร. …").
+
+It runs on three channels: the user's topic (node 0), every title/abstract/PDF text before any LLM
+or the UI sees it (search tool + node 5), and the final answer (node 8). Author names are never
+stored in state, reports, or `output/*.json` — papers keep only `n_authors`. Every decision is
+logged with the rule that fired and a masked form of the text (`J*** D**`), shown in the UI under
+**🛡️ Privacy decisions**. Try it live: `few-shot NER papers by Dr. <any name> for Thai`.
+
+## Contracts and deterministic sampling
+
+- `contracts.py`: one pydantic model per LLM output (keywords, extraction, gap proposal, verifier,
+  sensitive entities) and per tool's arguments. `llm_client.call_json(..., schema=...)` re-asks
+  the model with the exact validation error when JSON is valid but breaks the contract.
+- `LLM_TEMPERATURE=0` and `LLM_SEED=42` (both backends) — the same question gives the same
+  substance. Measured by `evaluation/consistency_test.py`.
+- `metrics.py` counts contract violations, retries, tool calls, invalid tool arguments and tokens
+  per run (UI: *Run metrics* expander; `run_metrics` in the state JSON).
+
+## Evaluation scripts and offline tests
+
+```bash
+python -m pytest -q tests                      # 23 offline tests, no network/API key (fictional data)
+python evaluation/consistency_test.py --runs 5 --max-papers 6          # same question x5
+python evaluation/compare_models.py --runs 2 --max-papers 5            # Claude vs Ollama (qwen3)
+```
+
+Both scripts write Markdown + JSON to `evaluation/results/`. `--offline` runs them on the fake
+data in `tests/fakes.py` — only to check the script works, the numbers are not an evaluation.
+
+## RAG knowledge base (KM)
+
+Two tiers, so the expensive work is only done where it pays off:
+
+| Tier | Which papers | What happens |
+|---|---|---|
+| 1 — screening | every candidate the search agent found (30–80) | title + abstract embedding, ranked in node 3 (unchanged) |
+| 2 — knowledge base | only the papers selected for deep analysis | full text (redacted) is split by section (abstract / method / experiments / results / limitations / conclusion; references are never indexed), embedded and stored in `rag_store/store.sqlite` |
+
+What the knowledge base changes:
+- **Extraction (node 5)** no longer reads only the first 12,000 characters (mostly intro + related
+  work). It reads the paper's opening plus the chunks retrieved for *method*, *dataset*, *results*
+  and *limitations* — so the results and limitations sections near the end actually get read.
+- **Verifier (node 7)** gets `search_paper_chunks` and `search_corpus` (see the tool table above)
+  and is told to search for counterexamples before accepting an "X is unexplored" claim; the
+  queries it ran are shown under each gap.
+- **It persists (this is the KM part):** a paper indexed once is never downloaded, converted,
+  redacted or embedded again; an extraction with the same text + prompt + model is reused instead
+  of calling the LLM. `search_corpus(scope="knowledge_base")` searches everything earlier runs
+  stored. The UI's *📚 Knowledge base* panel shows papers stored / new / reused per run.
+
+Storage is SQLite + numpy (exact cosine search; milliseconds for thousands of chunks) — no vector-DB
+dependency. Only privacy-redacted text is stored, and `pdf_cache/` is overwritten with the
+redacted text too. Both folders are git-ignored: never commit them (real paper text).
+`RAG_EMBEDDING=ollama:bge-m3` switches to a multilingual embedding model (Thai included) running
+in Ollama; changing the model re-embeds papers lazily. Delete `rag_store/` to start from empty —
+worth doing once in a demo, so the examiner sees a cold run as well as a warm one.
+
+## Paper links in the answer
+
+The LLM only ever cites `paper_id`s. After verification, `links.py` builds each supporting paper's
+link from its metadata — `https://doi.org/<doi>` when a DOI exists, otherwise the arXiv / OpenAlex /
+Semantic Scholar page — and drops any id that is not among the analyzed papers. An LLM cannot put a
+link into the answer, so it cannot invent one (a live run already produced a mistyped OpenAlex id,
+which was dropped).
+
+## Tracing with Langfuse + outbound contract
+
+Set `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_BASE_URL` in `.env` (self-hosted
+Langfuse, e.g. `http://localhost:3000`, or Langfuse Cloud) and every run becomes one trace:
+
+| Observation | Records |
+|---|---|
+| `research_gap_agent` (agent) | redacted topic, final answer (gaps + links), run metrics |
+| `node:<name>` (chain) | each graph node's input keys and output summary |
+| `llm:fast` / `llm:strong` (generation) | system prompt + user prompt, output, token usage, model, temperature; **reasoning** when `OLLAMA_THINK=true` |
+| `llm:tool_turn:<agent>` (generation) | system prompt, conversation so far, tool list → assistant text + tool calls (name, arguments) |
+| `tool:<name>` (tool) | arguments the LLM chose → the exact context returned to it |
+
+Nothing is traced when the keys are missing (tracing.py is a no-op), so the agent never depends
+on Langfuse being up.
+
+**Outbound contract** (`outbound.py`): nothing that leaves the process — trace, `output/*_state.json`,
+report — may contain personal data. Three layers: pre-tool (placeholders stripped from tool
+arguments), post-tool (search results scrubbed before the LLM sees them) and this boundary check,
+which Langfuse runs as its `mask` hook on every input/output/metadata and `save_outputs` runs on
+every file. The two spans that must look at raw personal data (the typed topic, PDF headers being
+scanned for names) record `[withheld: …]` instead of their content. `tests/test_pipeline.py`
+exports a full run's spans to memory and asserts no name, e-mail or raw topic appears anywhere.
+
+## Choosing models (measured on this project)
+
+Hardware: RTX 5070 Ti 16 GB, Ollama, temperature 0. Raw results: `evaluation/results/`.
+
+**Embeddings** (`evaluation/compare_embeddings.py`): 13 real papers, 577 chunks, 49 questions per
+language; a question counts as a hit if a chunk from the right section is in the top 3.
+
+| Model | hit@3 EN | hit@3 TH | TH–EN agreement |
+|---|---|---|---|
+| **ollama:embeddinggemma:300m** | **0.88** | **0.76** | 0.59 |
+| sentence_transformers:BAAI/bge-small-en-v1.5 | 0.65 | 0.39 | 0.16 |
+| ollama:bge-m3 | 0.55 | 0.59 | 0.63 |
+| ollama:qwen3-embedding:0.6b | 0.51 | 0.49 | 0.60 |
+
+→ `RAG_EMBEDDING=ollama:embeddinggemma:300m`. Each model is used with the query/document format
+its model card prescribes (`embeddings.EMBEDDING_FORMATS`) - in the evaluation and the pipeline alike.
+
+**LLMs** (`evaluation/compare_models.py`): 2 topics × 2 runs each, max 5 papers, same harness.
+
+| | qwen3:14b | gpt-oss:20b | qwen3.5:9b |
+|---|---|---|---|
+| completed / failed runs | 4 / 0 | 3 / 1 (Ollama 500) | 4 / 0 |
+| seconds per run (mean) | **377** | 564 | 452 |
+| tokens (all runs) | **225k** | 239k | 886k |
+| quote verified (extraction faithful to source) | 0.80 | 0.47 | **0.90** |
+| verifier read the cited sources | **1.00** | 0.92 | 0.83 |
+| contract pass on first try | 0.98 | 0.97 | 0.96 |
+| tool arguments valid | 0.83 | **1.00** | **1.00** |
+| same answer when asked twice | 1.00 | 1.00 | 1.00 |
+
+→ default stays **qwen3:14b**: fastest, no failed runs, faithful extraction, cheapest in tokens.
+gpt-oss:20b proposes the most specific gaps but paraphrases its "verbatim" quotes (0.47) and needs a
+model profile (it cannot disable thinking and returns empty content under `format=json` - see
+`llm_client.OLLAMA_PROFILES`). qwen3.5:9b extracts most faithfully but its verifier makes ~25 tool
+calls per run (4× the tokens). Caveats: small sample; "gaps supported" is judged by each model's own
+verifier, so it is not comparable across models and is left out of the table.
 
 ## What to build next
 

@@ -29,8 +29,78 @@ def _model():
 
 def embed(texts: list[str]) -> np.ndarray:
     """Returns an (N, D) array of L2-normalized embeddings."""
-    vectors = _model().encode(texts, normalize_embeddings=True, show_progress_bar=False)
+    import tracing
+    with tracing.observe("embed-texts", "embedding", model=CONFIG.embedding_model_name,
+                         input={"n_texts": len(texts)}, metadata={"purpose": "rank candidates"} if len(texts) > 1 else None) as obs:
+        vectors = _model().encode(texts, normalize_embeddings=True, show_progress_bar=False)
+        obs.update(output={"n_vectors": len(vectors)})
     return np.asarray(vectors)
+
+
+def _normalize(vectors) -> np.ndarray:
+    v = np.asarray(vectors, dtype=np.float32)
+    n = np.linalg.norm(v, axis=1, keepdims=True)
+    return v / np.where(n == 0, 1, n)
+
+
+@lru_cache(maxsize=4)
+def _st_model(name: str):
+    from sentence_transformers import SentenceTransformer
+    logger.info("Loading RAG embedding model %s ...", name)
+    return SentenceTransformer(name)
+
+
+# Query/document formatting each model's card prescribes. Using a model without its format
+# throws away quality (evaluation/compare_embeddings.py measures with these same formats).
+EMBEDDING_FORMATS = {
+    "bge-small-en": ("Represent this sentence for searching relevant passages: {t}", "{t}"),
+    "qwen3-embedding": ("Instruct: Given a question about a research paper, retrieve the passage that answers it\nQuery: {t}", "{t}"),
+    "embeddinggemma": ("task: search result | query: {t}", "title: none | text: {t}"),
+}
+
+
+def format_texts(spec: str, texts: list[str], kind: str) -> list[str]:
+    """kind = 'query' or 'document'."""
+    for key, (q, d) in EMBEDDING_FORMATS.items():
+        if key in spec:
+            template = q if kind == "query" else d
+            return [template.format(t=t) for t in texts]
+    return list(texts)
+
+
+def embed_for_rag(texts: list[str], kind: str = "document") -> np.ndarray:
+    """Embeddings for the RAG knowledge base (CONFIG.rag_embedding = "<backend>:<model>").
+    Kept separate from embed() so switching the RAG model (e.g. to multilingual ollama:bge-m3)
+    doesn't change Node 3's ranking - and with it the consistency-test baseline."""
+    backend, _, model = CONFIG.rag_embedding.partition(":")
+    if not texts:
+        return np.zeros((0, 1), dtype=np.float32)
+    texts = format_texts(CONFIG.rag_embedding, texts, kind)
+    import tracing
+    if kind == "query":           # one per search - recorded by the retriever observation, not separately
+        return _embed_for_rag(backend, model, texts)
+    with tracing.observe("embed-texts", "embedding", model=CONFIG.rag_embedding, input={"n_texts": len(texts)},
+                         metadata={"purpose": "index paper chunks"}) as obs:
+        out = _embed_for_rag(backend, model, texts)
+        obs.update(output={"n_vectors": len(out)})
+    return out
+
+
+def _embed_for_rag(backend: str, model: str, texts: list[str]) -> np.ndarray:
+    if backend == "ollama":
+        import httpx
+        out = []
+        for i in range(0, len(texts), 32):
+            resp = httpx.post(f"{CONFIG.ollama_host}/api/embed", json={"model": model, "input": texts[i:i + 32]},
+                              timeout=120)
+            resp.raise_for_status()
+            out += resp.json()["embeddings"]
+        return _normalize(out)
+    if backend == "sentence_transformers":
+        if model == CONFIG.embedding_model_name:
+            return _normalize(_model().encode(texts, normalize_embeddings=True, show_progress_bar=False))
+        return _normalize(_st_model(model).encode(texts, show_progress_bar=False))
+    raise ValueError(f"Unknown RAG_EMBEDDING backend {backend!r} (use sentence_transformers:<model> or ollama:<model>)")
 
 
 def rank_by_similarity(query: str, papers: list[dict]) -> list[dict]:

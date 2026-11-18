@@ -79,23 +79,95 @@ Return ONLY a JSON object, no other text:
 ]}}
 """
 
-VERIFIER_PROMPT = """You are fact-checking a proposed research gap against the actual
-extracted paper data below. Be skeptical — your job is to catch overclaiming.
+VERIFIER_SYSTEM = """You are a skeptical fact-checker for proposed research gaps. You can read the
+papers' own text with tools: get_paper_text (opening of a paper), and - when available -
+search_paper_chunks (passages inside one paper) and search_corpus (passages across all analyzed
+papers, to find counterexamples). Always check the source text with the tools before deciding -
+do not rely on the extracted summaries alone. Base your verdict ONLY on what the tools return."""
+
+VERIFIER_PROMPT = """Fact-check this proposed research gap.
 
 Proposed gap: {claim}
 Rationale given: {rationale}
-Cited papers and their extracted data:
+Cited paper ids: {cited_ids}
+Extracted summaries of the cited papers (may contain extraction errors - verify against source):
 {cited_paper_data}
 
-Check: (1) Do the cited papers actually support this claim, or is it overstated? (2) Is the
-evidence recent, or mostly old papers? (3) Are there any obvious counterexamples in the cited
-data that contradict the claim?
-
-Return ONLY a JSON object, no other text:
+Steps:
+1. For each cited paper id, read its source text: call search_paper_chunks with a query about the
+   specific part of the claim that paper is supposed to support (or get_paper_text if
+   search_paper_chunks is not available).
+2. If the claim says something is missing, lacking, unexplored or never combined, call
+   search_corpus with a query describing exactly that thing, to look for a paper that already
+   does it. A passage that does it is a counterexample - then the claim is not supported.
+3. Report three FACTS (you do not decide the verdict - code does):
+   - cited_papers_relevant: do the cited papers really concern the claim's topic AND every
+     qualifier in it (language, domain, data type, setting)? They should motivate the gap -
+     e.g. show the surrounding work or state the limitation.
+   - counterexample_found: did step 2 return a passage showing a paper that ALREADY DOES what the
+     claim says is missing? IMPORTANT: for a claim like "X has not been explored", finding NO
+     paper that does X is NOT a counterexample - it is consistent with the claim. Only a passage
+     that actually does X counts. If true, give that passage's paper_id.
+   - overstated: does the claim go further than the source text allows (e.g. "never" when the
+     papers only say "rarely", or a qualifier none of the papers mention)?
+4. Then answer with ONLY a JSON object, no other text:
 
 {{
-  "supported": true/false,
-  "notes": "1-2 sentences on what you checked and any concerns",
-  "unsupported_aspects": "specific part of the claim not backed by the cited data, or 'none'"
+  "cited_papers_relevant": true or false,
+  "counterexample_found": true or false,
+  "counterexample_paper_id": "paper id of the counterexample, or null",
+  "overstated": true or false,
+  "notes": "1-2 sentences on what you checked in the source text, including the counterexample search",
+  "unsupported_aspects": "specific part of the claim not backed by the source text, or 'none'",
+  "supported": "your own overall opinion, true or false (recorded but not used)"
 }}
+"""
+
+SEARCH_AGENT_SYSTEM = """You are a literature-search agent. You find academic papers by calling the
+search_papers tool. You decide which queries to run, on which source, with which year range and
+limit. Look at what each search returns before deciding the next call: if a query returns few or
+off-topic results, rephrase it or try another source; if results are good, move on to the next
+aspect of the topic. Stop when the topic is covered from several angles or the budget is used.
+Never invent papers - only the tool results count."""
+
+SEARCH_AGENT_PROMPT = """Research topic: {topic}
+Year range requested by the user: {year_from} to {year_to}
+Sources you may use: {sources}
+Suggested queries from the planning step (use, refine or replace them):
+{queries}
+Budget: at most {budget} search_papers calls.
+
+Use limit 15-25 per call so the ranking step has enough candidates. After the first results,
+check whether the papers actually match EVERY part of the topic (e.g. the language/domain/setting,
+not just the general method); if not, make follow-up calls aimed at the missing part.
+
+Search now. When you are done, reply with a 2-3 sentence summary of what you searched and what
+you found (no JSON needed)."""
+
+SENSITIVE_EXTRACT_PROMPT = """Extract every piece of personal or identifying information from the text
+below. You only EXTRACT - a separate decision model decides what to do with each item.
+
+Channel: {channel}  (user_input = a topic typed by a user; paper_text = text of an academic paper;
+final_answer = text the system is about to show the user)
+
+For each item return:
+- text: copied EXACTLY as it appears in the text (same spelling, same script)
+- type: PERSON | EMAIL | PHONE | ID_NUMBER | ADDRESS | ORGANIZATION | OTHER
+- role: author (writes/wrote the paper, byline) | cited_author (named as the author of a cited work)
+        | subject_person (the person the text is about or asks about) | eponym (a person's name that
+        is part of a method/theorem/algorithm/dataset name, e.g. "Kalman" in "Kalman filter",
+        "Bayes" in "naive Bayes") | affiliation (university/company an author belongs to)
+        | contact | other
+- confidence: 0.0-1.0
+
+Include Thai and other non-Latin names. Do NOT include model names (BERT, GPT-4), dataset names,
+or ordinary words. If there is nothing, return an empty list.
+
+Text:
+<<<
+{text}
+>>>
+
+Return ONLY a JSON object:
+{{"entities": [{{"text": "...", "type": "PERSON", "role": "author", "confidence": 0.9}}]}}
 """

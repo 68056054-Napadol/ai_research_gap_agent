@@ -1,0 +1,49 @@
+{
+  "name": "Sensitive information handling",
+  "description": "Decision model used by privacy.py. The LLM (and regex/metadata detectors) only EXTRACT candidate entities; these tables DECIDE what happens to each one. Changing behaviour = editing a rule row here, not prompting the LLM differently.",
+  "decisions": [
+    {
+      "id": "entity_action",
+      "name": "What to do with one detected entity",
+      "hitPolicy": "FIRST",
+      "inputs": [
+        {"id": "type", "label": "Entity type", "values": ["PERSON", "EMAIL", "PHONE", "ID_NUMBER", "ADDRESS", "ORGANIZATION", "OTHER"]},
+        {"id": "role", "label": "Role in text", "values": ["author", "cited_author", "subject_person", "eponym", "affiliation", "contact", "other"]},
+        {"id": "detected_by", "label": "Detector", "values": ["regex", "metadata", "llm"]},
+        {"id": "confidence", "label": "Detector confidence (0-1)"},
+        {"id": "channel", "label": "Where the text is going", "values": ["user_input", "paper_text", "final_answer"]}
+      ],
+      "outputs": [
+        {"id": "action", "values": ["REDACT", "KEEP"]},
+        {"id": "label", "label": "Replacement placeholder"}
+      ],
+      "rules": [
+        {"id": "R1", "when": {"type": "in [\"EMAIL\",\"PHONE\",\"ID_NUMBER\",\"ADDRESS\"]"}, "then": {"action": "REDACT", "label": "[CONTACT]"}, "why": "Contact details and ID numbers are always removed"},
+        {"id": "R2", "when": {"type": "PERSON", "role": "eponym"}, "then": {"action": "KEEP", "label": ""}, "why": "Name that is part of a technique/theorem/dataset name (e.g. 'Kalman filter') is technical vocabulary, not a reference to a person"},
+        {"id": "R3", "when": {"type": "PERSON", "detected_by": "metadata"}, "then": {"action": "REDACT", "label": "[AUTHOR]"}, "why": "Exact match with the paper's own author list from the source API"},
+        {"id": "R4", "when": {"type": "PERSON", "role": "cited_author"}, "then": {"action": "REDACT", "label": "[CITED_AUTHOR]"}, "why": "Author named in an in-text citation"},
+        {"id": "R5", "when": {"type": "PERSON", "channel": "user_input", "confidence": ">= 0.4"}, "then": {"action": "REDACT", "label": "[PERSON]"}, "why": "Be strict with what the user types: lower confidence bar"},
+        {"id": "R6", "when": {"type": "PERSON", "confidence": ">= 0.6"}, "then": {"action": "REDACT", "label": "[PERSON]"}, "why": "Any other person name the detector is reasonably sure about"},
+        {"id": "R7", "when": {"type": "ORGANIZATION", "role": "affiliation"}, "then": {"action": "REDACT", "label": "[AFFILIATION]"}, "why": "Affiliations identify authors"},
+        {"id": "R8", "when": {}, "then": {"action": "KEEP", "label": ""}, "why": "Default: low-confidence or non-identifying entity"}
+      ]
+    },
+    {
+      "id": "input_action",
+      "name": "Should the agent run on this (redacted) topic?",
+      "hitPolicy": "FIRST",
+      "inputs": [
+        {"id": "n_person_redacted", "label": "Person names redacted from the topic"},
+        {"id": "n_contact_redacted", "label": "Contact/ID items redacted from the topic"},
+        {"id": "content_words_left", "label": "Meaningful words left after redaction"}
+      ],
+      "outputs": [{"id": "action", "values": ["PROCEED", "PROCEED_REDACTED", "REJECT"]}, {"id": "message"}],
+      "rules": [
+        {"id": "I1", "when": {"content_words_left": "< 2"}, "then": {"action": "REJECT", "message": "After removing personal information there is no research topic left. This agent searches topics, not people."}, "why": "Topic was essentially a person lookup"},
+        {"id": "I2", "when": {"n_person_redacted": ">= 1"}, "then": {"action": "PROCEED_REDACTED", "message": "Person names were removed from the topic before searching."}, "why": "Keep the research part, drop the person"},
+        {"id": "I3", "when": {"n_contact_redacted": ">= 1"}, "then": {"action": "PROCEED_REDACTED", "message": "Contact details were removed from the topic before searching."}, "why": ""},
+        {"id": "I4", "when": {}, "then": {"action": "PROCEED", "message": ""}, "why": "Nothing sensitive found"}
+      ]
+    }
+  ]
+}

@@ -47,6 +47,38 @@ class Config:
     # 16GB-RAM, no-GPU hardware; raise it if you have more RAM to spare.
     ollama_max_ctx: int = _int("OLLAMA_MAX_CTX", 8192)
 
+    # --- Sampling (Harness tuning: same question -> same substance) ---
+    # temperature=0 makes both backends pick the most likely token every time, so asking the
+    # same topic repeatedly gives (near-)identical answers. llm_seed additionally pins Ollama's
+    # sampler. See evaluation/consistency_test.py for the 5-run check.
+    llm_temperature: float = _float("LLM_TEMPERATURE", 0.0)
+    llm_seed: int = _int("LLM_SEED", 42)
+
+    # --- Tool-calling agents (search agent in Node 2, verifier agent in Node 7) ---
+    max_tool_steps: int = _int("MAX_TOOL_STEPS", 8)          # LLM turns per agent before forcing an answer
+    max_search_tool_calls: int = _int("MAX_SEARCH_TOOL_CALLS", 10)  # budget for search_papers calls per run
+    verifier_text_chars: int = _int("VERIFIER_TEXT_CHARS", 3000)   # source text returned per get_paper_text call
+
+    # --- Privacy (decision model + LLM sensitive-info extraction, see privacy.py) ---
+    # Run the LLM entity extractor on each paper's header (where author names/affiliations/emails
+    # live). Regex + metadata-name redaction always runs regardless; this adds 1 fast-tier call per
+    # full-text paper.
+    privacy_llm_on_papers: bool = os.getenv("PRIVACY_LLM_ON_PAPERS", "true").strip().lower() in ("1", "true", "yes")
+    privacy_header_chars: int = _int("PRIVACY_HEADER_CHARS", 2500)
+
+    # --- RAG knowledge base (rag_store.py) - persists across runs = KM ---
+    rag_enabled: bool = os.getenv("RAG_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+    rag_store_dir: str = os.getenv("RAG_STORE_DIR", "rag_store")
+    # "<backend>:<model>": sentence_transformers:<hf id>  or  ollama:<model> (e.g. ollama:bge-m3,
+    # multilingual incl. Thai, runs on the GPU through Ollama). Changing it re-embeds papers lazily.
+    rag_embedding: str = os.getenv("RAG_EMBEDDING", "sentence_transformers:BAAI/bge-small-en-v1.5")
+    rag_chunk_chars: int = _int("RAG_CHUNK_CHARS", 1200)
+    rag_chunk_overlap: int = _int("RAG_CHUNK_OVERLAP", 200)
+    rag_reuse_extracts: bool = os.getenv("RAG_REUSE_EXTRACTS", "true").strip().lower() in ("1", "true", "yes")
+
+    # --- Tracing (tracing.py): on automatically when LANGFUSE_PUBLIC_KEY/SECRET_KEY are set ---
+    tracing_enabled: bool = os.getenv("TRACING_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+
     # --- Data source keys (all optional) ---
     semantic_scholar_api_key: str = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
     openalex_api_key: str = os.getenv("OPENALEX_API_KEY", "")

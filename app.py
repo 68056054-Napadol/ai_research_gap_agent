@@ -30,6 +30,10 @@ import time
 
 import streamlit as st
 
+import links
+import metrics
+import outbound
+import tracing
 from config import CONFIG
 from graph import build_graph
 from logging_utils import QueueLogHandler, quiet_noisy_third_party_loggers
@@ -45,26 +49,30 @@ PAPER_BOX_HEIGHT = 180
 # Node metadata + graph shape (mirrors graph.py exactly — see that file for the real edges).
 # ---------------------------------------------------------------------------
 NODE_ORDER = [
-    "generate_keywords", "search_sources", "filter_and_rank", "check_sufficiency",
-    "extract_paper_data", "compare_papers", "analyze_gaps",
+    "sanitize_input", "generate_keywords", "search_sources", "filter_and_rank", "check_sufficiency",
+    "extract_paper_data", "compare_papers", "analyze_gaps", "privacy_guard",
 ]
 NODE_META = {
+    "sanitize_input": ("🛡️", "Privacy check on input (LLM + decision model)"),
     "generate_keywords": ("🔑", "Generate search keywords"),
-    "search_sources": ("🔍", "Search academic sources"),
+    "search_sources": ("🔍", "Search agent (LLM tool calling: search_papers)"),
     "filter_and_rank": ("📊", "Rank papers by relevance"),
     "check_sufficiency": ("✅", "Check if enough papers found"),
     "extract_paper_data": ("📄", "Extract data from each paper"),
     "compare_papers": ("🔬", "Compare papers & synthesize trends"),
-    "analyze_gaps": ("💡", "Propose & verify research gaps"),
+    "analyze_gaps": ("💡", "Propose gaps + verifier agent (tool: get_paper_text)"),
+    "privacy_guard": ("🛡️", "Privacy guard on final answer"),
 }
 # Linear "what runs next" edges. check_sufficiency is conditional (handled specially below) and
 # analyze_gaps has no successor (END) — see graph.py.
 NEXT_NODE = {
+    "sanitize_input": "generate_keywords",
     "generate_keywords": "search_sources",
     "search_sources": "filter_and_rank",
     "filter_and_rank": "check_sufficiency",
     "extract_paper_data": "compare_papers",
     "compare_papers": "analyze_gaps",
+    "analyze_gaps": "privacy_guard",
 }
 RETRY_RESET_KEYS = ["generate_keywords", "search_sources", "filter_and_rank", "check_sufficiency"]
 
@@ -94,6 +102,10 @@ def _new_card_state():
 
 
 def _summarize_input(node_key: str, acc: dict) -> str:
+    if node_key == "sanitize_input":
+        return "Topic as typed (checked before anything else sees it)"
+    if node_key == "privacy_guard":
+        return "Trend summary + gap claims/rationales/verifier notes"
     if node_key == "generate_keywords":
         topic = acc.get("research_topic", "")
         prior = acc.get("prior_queries_tried") or []
@@ -121,12 +133,23 @@ def _summarize_input(node_key: str, acc: dict) -> str:
 
 
 def _summarize_output(node_key: str, update: dict, acc: dict) -> str:
+    if node_key == "sanitize_input":
+        d = update.get("input_decision") or {}
+        recs = update.get("privacy_log") or []
+        extra = f" — {d.get('message')}" if d.get("message") else ""
+        return (f"Decision **{d.get('action')}** (rule {d.get('rule')}), {len(recs)} entity decision(s){extra}  \n"
+                f"Topic used: _{update.get('research_topic', '')}_")
+    if node_key == "privacy_guard":
+        return f"**{update.get('final_answer_redactions', 0)}** redaction(s) applied to the final answer"
     if node_key == "generate_keywords":
         qs = update.get("search_queries") or []
         return "Queries: " + "; ".join(f'"{q}"' for q in qs)
     if node_key == "search_sources":
         n = len(update.get("candidate_papers") or [])
-        return f"Found **{n}** unique candidate papers after dedup"
+        calls = [t for t in (update.get("tool_trace") or []) if t.get("tool_name") == "search_papers"]
+        fb = " ⚠️ model made no tool calls — harness fallback used" if update.get("search_used_fallback") else ""
+        return (f"**{len(calls)}** search_papers call(s) chosen by the LLM → **{n}** unique candidate papers{fb}  \n"
+                f"Agent summary: _{(update.get('search_summary') or '')[:300]}_")
     if node_key == "filter_and_rank":
         sel = update.get("selected_papers") or []
         ranked = update.get("ranked_papers") or []
@@ -148,7 +171,9 @@ def _summarize_output(node_key: str, update: dict, acc: dict) -> str:
         gaps = update.get("gap_candidates") or []
         if not gaps:
             return "No gap candidates survived verification"
-        return "\n".join(f"- {g['claim']} _( {g['confidence_level']}, {g['confidence_score']}/100 )_" for g in gaps)
+        return "\n".join(f"- {g['claim']} _( {g['confidence_level']}, {g['confidence_score']}/100, "
+                         f"verifier read {len(g.get('evidence_read_ids', []))}/{len(g.get('supporting_paper_ids', []))} sources )_"
+                         for g in gaps)
     return ""
 
 
@@ -256,6 +281,12 @@ with st.sidebar:
                  "hardware and want to try it for the 'strong' tier's reasoning quality.",
         )
 
+    st.caption("Tracing: " + ("Langfuse ON (" + (os.getenv("LANGFUSE_BASE_URL") or os.getenv("LANGFUSE_HOST") or "cloud") + ")"
+                              if os.getenv("LANGFUSE_PUBLIC_KEY") else "off — set LANGFUSE_* in .env to enable"))
+    CONFIG.rag_enabled = st.checkbox("Use RAG knowledge base", value=CONFIG.rag_enabled,
+                                     help="Chunk + embed selected papers into a persistent store (rag_store/), reuse across runs, "
+                                          "and give the verifier search_paper_chunks / search_corpus tools.")
+
     st.divider()
     CONFIG.max_deep_analysis_papers = st.slider(
         "Papers to deep-analyze", min_value=5, max_value=40, value=CONFIG.max_deep_analysis_papers,
@@ -303,6 +334,7 @@ if run_clicked:
     elif backend == "cloud" and not CONFIG.anthropic_api_key:
         st.error("Enter an Anthropic API key in the sidebar, or switch to the local backend.")
     else:
+        metrics.reset()
         agent_graph = build_graph()
         initial_state = {
             "research_topic": topic,
@@ -328,13 +360,24 @@ if run_clicked:
 
         run_result = {"state": None, "error": None}
 
+        tracing.init()
+        ui_session_id = st.session_state.setdefault("ui_session_id", "streamlit-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+
         def _run_agent():
             try:
                 final = dict(initial_state)
-                for step in agent_graph.stream(initial_state):
-                    for node_name, node_update in step.items():
-                        final.update(node_update)
-                        event_queue.put(("node_done", node_name, node_update, dict(final)))
+                with tracing.run_trace("streamlit", session_id=ui_session_id) as trace:
+                    for step in agent_graph.stream(initial_state, {"recursion_limit": 60}):
+                        for node_name, node_update in step.items():
+                            final.update(node_update)
+                            event_queue.put(("node_done", node_name, node_update, dict(final)))
+                    final.setdefault("run_metrics", metrics.snapshot())
+                    trace.finish(final)
+                if trace.trace_id:
+                    final["trace_id"] = trace.trace_id
+                    if trace.trace_url:
+                        final["trace_url"] = trace.trace_url
+                tracing.flush()
                 run_result["state"] = final
             except Exception as e:  # surfaced in the main thread below, not raised here
                 run_result["error"] = e
@@ -349,9 +392,9 @@ if run_clicked:
         # --- card state setup ---
         cards = {key: _new_card_state() for key in NODE_ORDER}
         acc_state = dict(initial_state)
-        cards["generate_keywords"]["status"] = "running"
-        cards["generate_keywords"]["started_at"] = time.monotonic()
-        cards["generate_keywords"]["input_summary"] = _summarize_input("generate_keywords", acc_state)
+        cards["sanitize_input"]["status"] = "running"
+        cards["sanitize_input"]["started_at"] = time.monotonic()
+        cards["sanitize_input"]["input_summary"] = _summarize_input("sanitize_input", acc_state)
 
         st.caption("Each card below is one step of the pipeline — see architecture doc §2.2.")
         placeholders = {key: st.empty() for key in NODE_ORDER}
@@ -426,7 +469,9 @@ if run_clicked:
                             cards[reset_key] = _new_card_state()
                             cards[reset_key]["attempt"] = attempt
                             redraw.add(reset_key)
-                elif node_name == "analyze_gaps":
+                elif node_name == "privacy_guard":
+                    next_key = None
+                elif node_name == "sanitize_input" and (node_update.get("input_decision") or {}).get("action") == "REJECT":
                     next_key = None
                 else:
                     next_key = NEXT_NODE.get(node_name)
@@ -465,12 +510,13 @@ if run_clicked:
             st.error(f"Agent run failed: {run_result['error']}")
         else:
             final_state = run_result["state"]
+            final_state.setdefault("run_metrics", metrics.snapshot())
             st.session_state.final_state = final_state
 
             os.makedirs(CONFIG.output_dir, exist_ok=True)
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             with open(os.path.join(CONFIG.output_dir, f"{ts}_state.json"), "w", encoding="utf-8") as f:
-                json.dump(final_state, f, indent=2, default=str, ensure_ascii=False)
+                json.dump(outbound.enforce(final_state, "state.json"), f, indent=2, default=str, ensure_ascii=False)
 
 # ---------------------------------------------------------------------------
 # Full raw log, persisted — the run above already showed this live; this keeps it visible (not
@@ -491,12 +537,22 @@ if st.session_state.log_lines:
 # Results
 # ---------------------------------------------------------------------------
 state = st.session_state.final_state
-if state:
+if state and (state.get("input_decision") or {}).get("action") == "REJECT":
+    d = state["input_decision"]
+    st.error(f"🛡️ Input rejected by the decision model (rule {d.get('rule')}): {d.get('message')}")
+elif state:
+    d = state.get("input_decision") or {}
+    if d.get("action") == "PROCEED_REDACTED":
+        st.warning(f"🛡️ {d.get('message')} Topic used: “{state.get('research_topic')}” (rule {d.get('rule')})")
+
+    if state.get("trace_url"):
+        st.info(f"🔭 Langfuse trace of this run: {state['trace_url']}")
     papers = state.get("selected_papers", [])
     st.subheader(f"Papers analyzed ({len(papers)} of {len(state.get('candidate_papers', []))} found)")
     for p in papers:
-        authors = ", ".join(p.get("authors") or []) or "unknown authors"
-        st.markdown(f"- **{p.get('title')}** ({p.get('year', '?')}) — {authors} "
+        # author names are never shown or stored - privacy.scrub_paper keeps only the count
+        link = links.markdown_link({"title": p.get("title"), "year": p.get("year"), "url": p.get("url") or links.paper_url(p)})
+        st.markdown(f"- **{link}** — {p.get('n_authors', '?')} author(s) "
                     f"· `{p.get('id')}` · similarity {p.get('similarity_score', 0):.2f}")
 
     st.subheader("Comparison table")
@@ -505,18 +561,76 @@ if state:
     st.subheader("Trends across papers")
     st.write(state.get("trend_summary", "_(none)_"))
 
-    st.subheader("Candidate research gaps")
+    # ---- FINAL ANSWER ----
+    st.header("✅ Final answer — candidate research gaps")
+    st.caption("Each gap is checked by the verifier agent, which reads the cited papers through the "
+               "get_paper_text tool. The context it read is in the tool-call panel below (agent = verifier_agent).")
     gaps = state.get("gap_candidates", [])
     if not gaps:
         st.info("No gap candidates survived verification — try a broader topic or more papers.")
-    for gap in gaps:
+    for i, gap in enumerate(gaps, 1):
         with st.container(border=True):
             color = CONFIDENCE_COLOR.get(gap.get("confidence_level"), "gray")
-            st.markdown(f"#### {gap['claim']}")
-            st.markdown(f":{color}[**{gap['confidence_level']} confidence** — {gap['confidence_score']}/100]")
+            st.markdown(f"#### {i}. {gap['claim']}")
+            st.markdown(f":{color}[**{gap['confidence_level']} confidence** — {gap['confidence_score']}/100] · "
+                        f"verifier read **{len(gap.get('evidence_read_ids', []))}/{len(gap.get('supporting_paper_ids', []))}** "
+                        f"cited sources via tool")
             st.write(gap.get("rationale", ""))
-            st.caption(f"Supporting papers: {', '.join(gap.get('supporting_paper_ids', []))}")
+            st.markdown("**Supporting papers** (links built from paper metadata, not written by the AI):  \n"
+                        + "  \n".join(f"• {links.markdown_link(sp)}" for sp in gap.get("supporting_papers", [])))
             st.caption(f"Verifier notes: {gap.get('verifier_notes', '')}")
+            if gap.get("verifier_decision_reason"):
+                f = gap.get("verifier_facts") or {}
+                st.caption(f"Verdict rule: {gap['verifier_decision_reason']} · facts: relevant={f.get('cited_papers_relevant')}, "
+                           f"counterexample={f.get('counterexample_found')}, overstated={f.get('overstated')}")
+            if gap.get("counterexample_searches"):
+                st.caption("🔎 Counterexample searches across the corpus (search_corpus): "
+                           + "; ".join(f"“{q}”" for q in gap["counterexample_searches"]))
+            if gap.get("dropped_ids"):
+                st.caption(f"⚠️ Dropped cited ids not among analyzed papers: {', '.join(gap['dropped_ids'])}")
+
+    # ---- TOOL CALLS: context returned to the agents ----
+    trace = state.get("tool_trace") or []
+    st.header(f"🔧 Tool calls — context returned from tools ({len(trace)})")
+    st.caption("Every row is one tool call the LLM issued: tool name + arguments it chose, and the context "
+               "the harness returned to it. agent = harness_fallback means the model did not call tools itself.")
+    st.dataframe([{
+        "#": i, "agent": t.get("agent"), "gap": str(t.get("gap_index", "")), "tool": t.get("tool_name"),
+        "arguments": json.dumps(t.get("arguments", {}), ensure_ascii=False),
+        "ok": t.get("ok", True), "items": t.get("n_items", ""), "context chars": t.get("result_chars", 0),
+        "notes": "; ".join((t.get("policy_notes") or []) + ([t["error"]] if t.get("error") else [])),
+    } for i, t in enumerate(trace, 1)], width="stretch", hide_index=True)
+    for i, t in enumerate(trace, 1):
+        with st.expander(f"#{i} {t.get('agent')} → {t.get('tool_name')}({json.dumps(t.get('arguments', {}), ensure_ascii=False)[:90]})"):
+            st.markdown("**Arguments (from the LLM)**")
+            st.json(t.get("arguments", {}))
+            st.markdown("**Context returned to the LLM**")
+            try:
+                st.json(json.loads(t.get("result_preview", "")))
+            except (ValueError, TypeError):
+                st.code(t.get("result_preview", ""), language=None)
+
+    # ---- PRIVACY DECISIONS ----
+    plog = state.get("privacy_log") or []
+    st.header(f"🛡️ Privacy decisions — decision model ({len(plog)})")
+    st.caption("Detectors (regex / paper metadata / LLM) extract candidates; decision_model/sensitive_info.dmn.json "
+               "decides. Original strings are never stored — only a masked form.")
+    st.dataframe(plog, width="stretch", hide_index=True)
+
+    kb = state.get("knowledge_base")
+    if kb:
+        m = state.get("run_metrics") or {}
+        st.header("📚 Knowledge base (RAG, persists across runs)")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Papers stored", kb.get("papers", 0))
+        c2.metric("Chunks", kb.get("chunks", 0))
+        c3.metric("New this run", int(m.get("rag_papers_indexed", 0)))
+        c4.metric("Reused this run", int(m.get("rag_papers_reused", 0) + m.get("rag_full_text_reused", 0)))
+        st.caption(f"Extractions reused from the knowledge base this run: {int(m.get('extract_cache_hits', 0))} · "
+                   f"embedding: {kb.get('embedding')} · store: {kb.get('path')}")
+
+    with st.expander("Run metrics (contracts, tool calls, tokens)"):
+        st.json(state.get("run_metrics") or {})
 
     st.divider()
     report_md = render_report(state)

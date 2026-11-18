@@ -70,6 +70,14 @@ def fetch_and_convert(oa_pdf_url: str | None, paper_id: str) -> str | None:
     return text or None
 
 
+def overwrite_cache(paper_id: str, text: str) -> None:
+    """Replace the cached Markdown with its privacy-redacted version (nodes.extract_paper_data),
+    so raw author names/e-mails from PDF headers don't stay on disk after the first run."""
+    os.makedirs(CONFIG.pdf_cache_dir, exist_ok=True)
+    with open(_cache_path(paper_id), "w", encoding="utf-8") as f:
+        f.write(text)
+
+
 def _download_pdf(url: str, dest_path: str) -> None:
     """
     Downloads to dest_path, then verifies the file actually starts with a %PDF- magic byte
