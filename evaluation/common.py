@@ -69,6 +69,7 @@ def run_summary(state: dict, seconds: float) -> dict:
         "contract_first_try_rate": m.get("contract_first_try_rate"),
         "contract_final_pass_rate": m.get("contract_final_pass_rate"),
         "tool_args_valid_rate": m.get("tool_args_valid_rate"),
+        "tool_args_repaired": m.get("tool_args_repaired", 0),
         "llm_calls": m.get("llm_calls", 0),
         "json_empty_responses": m.get("json_empty_response", 0),
         "input_tokens": m.get("input_tokens", 0),

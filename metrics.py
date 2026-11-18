@@ -37,4 +37,5 @@ def snapshot() -> dict:
     tool_calls = snap.get("tool_calls", 0)
     if tool_calls:
         snap["tool_args_valid_rate"] = round(1 - snap.get("tool_args_invalid", 0) / tool_calls, 3)
+        snap["tool_args_repaired_rate"] = round(snap.get("tool_args_repaired", 0) / tool_calls, 3)
     return snap

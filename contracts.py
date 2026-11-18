@@ -113,8 +113,11 @@ class SearchPapersArgs(BaseModel):
 
 
 class GetPaperTextArgs(BaseModel):
+    # No max_chars: how much source text goes back into the context is the harness's decision
+    # (CONFIG.verifier_text_chars), not the model's. When it was exposed, qwen3:14b asked for
+    # 10000 > le=8000 in 18 of 183 live tool calls - each one a wasted model turn, for a value
+    # the harness then capped at 3000 anyway.
     paper_id: str = Field(pattern=r"^(semantic_scholar|arxiv|openalex):.+")
-    max_chars: int = Field(default=3000, ge=200, le=8000)
 
 
 class SearchPaperChunksArgs(BaseModel):

@@ -77,6 +77,7 @@ def evaluate_backend(backend: str, topics: list, runs: int, args, fast: str = No
     agg["gap_similarity_mean"] = _mean([t["consistency"].get("gap_similarity_mean") for t in per_topic.values()])
     agg["search_used_fallback_runs"] = sum(1 for r in all_runs if r["search_used_fallback"])
     agg["json_empty_responses"] = int(sum(r.get("json_empty_responses", 0) for r in all_runs))
+    agg["tool_args_repaired"] = int(sum(r.get("tool_args_repaired", 0) for r in all_runs))
     agg["total_tokens"] = int(sum(r["input_tokens"] + r["output_tokens"] for r in all_runs))
     agg["failed_runs"] = len(failures)
     agg["completed_runs"] = len(all_runs)
@@ -136,7 +137,7 @@ def main():
     md += [f"- {l}: {results[l]['model']}" for l in labels]
     md += [f"- temperature={CONFIG.llm_temperature}, topics={len(args.topics)}, runs/topic={args.runs}, max papers={args.max_papers}", "",
            "| Dimension | better | " + " | ".join(labels) + " |", "|---|---|" + "---|" * len(labels)]
-    for k, hib in [("completed_runs", True), ("failed_runs", False)] + DIMENSIONS + [("search_used_fallback_runs", False), ("json_empty_responses", False), ("total_tokens", False)]:
+    for k, hib in [("completed_runs", True), ("failed_runs", False)] + DIMENSIONS + [("search_used_fallback_runs", False), ("json_empty_responses", False), ("tool_args_repaired", False), ("total_tokens", False)]:
         vals = [results[l]["aggregate"].get(k) for l in labels]
         md.append(f"| {k} | {'higher' if hib else 'lower'} | " + " | ".join(str(v) for v in vals) + " |")
     matched = []

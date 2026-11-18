@@ -659,7 +659,7 @@ its model card prescribes (`embeddings.EMBEDDING_FORMATS`) - in the evaluation a
 | quote verified (extraction faithful to source) | 0.80 | 0.47 | **0.90** |
 | verifier read the cited sources | **1.00** | 0.92 | 0.83 |
 | contract pass on first try | 0.98 | 0.97 | 0.96 |
-| tool arguments valid | 0.83 | **1.00** | **1.00** |
+| tool arguments valid | 0.83 → **1.00** after fix below | **1.00** | **1.00** |
 | same answer when asked twice | 1.00 | 1.00 | 1.00 |
 
 → default stays **qwen3:14b**: fastest, no failed runs, faithful extraction, cheapest in tokens.
@@ -668,6 +668,25 @@ model profile (it cannot disable thinking and returns empty content under `forma
 `llm_client.OLLAMA_PROFILES`). qwen3.5:9b extracts most faithfully but its verifier makes ~25 tool
 calls per run (4× the tokens). Caveats: small sample; "gaps supported" is judged by each model's own
 verifier, so it is not comparable across models and is left out of the table.
+
+**Harness fix for qwen3:14b's invalid tool arguments.** All 18 of its 183 invalid calls were
+`get_paper_text(max_chars=10000)` against a schema capped at 8000. The fix removes that model-facing
+knob (the verifier's read length is now `VERIFIER_TEXT_CHARS`, set by the harness) and adds
+repair-before-validate (`tools.repair_arguments`: clamp to schema bounds, coerce numeric strings,
+drop unknown keys, and tell the model what was changed). Re-run with the same 2 topics × 2 runs
+(`evaluation/results/compare_models_20261119_004705.md`):
+
+| qwen3:14b | before | after |
+|---|---|---|
+| tool arguments valid | 0.83 | **1.00** (0 needed repair) |
+| verifier tool calls per run | 11–13 | **9** |
+| LLM calls per run | 19–25 | **18** |
+| seconds per run (mean) | 377 | **311** |
+| tokens (all runs) | 225k | **183k** |
+| quote verified / evidence coverage | 0.80 / 1.00 | 0.80 / 1.00 |
+
+Caveat: the second run reused a warm PDF cache and knowledge base, so part of the speed-up is cache;
+the drop in tool and LLM calls comes from no longer retrying rejected `get_paper_text` calls.
 
 ## What to build next
 

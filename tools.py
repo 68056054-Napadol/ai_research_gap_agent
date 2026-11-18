@@ -45,9 +45,9 @@ SEARCH_PAPERS_SPEC = _spec(
 )
 GET_PAPER_TEXT_SPEC = _spec(
     "get_paper_text",
-    "Return the source text of one paper that was selected for analysis: an excerpt of its full text "
-    "if an open-access PDF was read, otherwise its abstract. Use it to check claims against the "
-    "original paper rather than a summary.",
+    "Return the opening of one analyzed paper's source text (up to a few thousand characters of the "
+    "full text if an open-access PDF was read, otherwise its abstract). For a specific part of a "
+    "paper, prefer search_paper_chunks.",
     GetPaperTextArgs,
 )
 SEARCH_PAPER_CHUNKS_SPEC = _spec(
@@ -73,13 +73,63 @@ def _err(msg: str, **extra) -> tuple:
     return json.dumps({"error": msg}, ensure_ascii=False), {"ok": False, "error": msg, **extra}
 
 
+def _int_bounds(prop: dict) -> tuple:
+    """(is_integer, minimum, maximum) from a JSON-schema property, incl. Optional[int] (anyOf)."""
+    for p in [prop] + [a for a in prop.get("anyOf", []) if isinstance(a, dict)]:
+        if p.get("type") == "integer":
+            return True, p.get("minimum"), p.get("maximum")
+    return False, None, None
+
+
+def repair_arguments(args_model, arguments) -> tuple:
+    """Repair-before-validate, driven by the contract's own JSON schema.
+
+    Repaired (the intent is unambiguous, so a round-trip to the model would only cost a turn):
+      - integer out of range        -> clamped to the bound          (limit=500 -> 50)
+      - integer sent as a string    -> converted                     ("20" -> 20)
+      - argument the tool doesn't take -> dropped                    (a removed/unknown knob)
+    NOT repaired - still rejected so the model must fix it (these signal a real mistake or a
+    hallucination): missing/blank required fields, malformed or unknown paper ids, sources that
+    don't exist, year_from > year_to.
+    Returns (repaired_arguments, notes); every repair is reported back to the model as a note.
+    """
+    if not isinstance(arguments, dict):
+        return arguments, []
+    props = args_model.model_json_schema().get("properties", {})
+    fixed, notes = {}, []
+    for key, value in arguments.items():
+        if key not in props:
+            notes.append(f"ignored argument {key!r}: this tool does not take it")
+            continue
+        is_int, lo, hi = _int_bounds(props[key])
+        if is_int and value is not None and not isinstance(value, bool):
+            if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+                value = int(value.strip())
+                notes.append(f"{key}: converted string to integer")
+            elif isinstance(value, float) and value.is_integer():
+                value = int(value)
+            if isinstance(value, int):
+                if hi is not None and value > hi:
+                    notes.append(f"{key}={value} capped at {hi}")
+                    value = hi
+                elif lo is not None and value < lo:
+                    notes.append(f"{key}={value} raised to {lo}")
+                    value = lo
+        fixed[key] = value
+    return fixed, notes
+
+
 def _validate(args_model, arguments: dict):
+    """Returns (args, problem, notes)."""
+    repaired, notes = repair_arguments(args_model, arguments)
+    if notes:
+        metrics.inc("tool_args_repaired")
     try:
-        return args_model.model_validate(arguments), None
+        return args_model.model_validate(repaired), None, notes
     except ValidationError as e:
         metrics.inc("tool_args_invalid")
         msg = "; ".join(f"{'.'.join(str(p) for p in er['loc']) or 'args'}: {er['msg']}" for er in e.errors()[:5])
-        return None, f"invalid arguments ({msg}) - fix them and call again"
+        return None, f"invalid arguments ({msg}) - fix them and call again", notes
 
 
 class SearchToolContext:
@@ -97,14 +147,14 @@ class SearchToolContext:
     def execute(self, name: str, arguments: dict) -> tuple:
         if name != "search_papers":
             return _err(f"unknown tool {name!r}; available: search_papers")
-        args, problem = _validate(SearchPapersArgs, arguments)
+        args, problem, repair_notes = _validate(SearchPapersArgs, arguments)
         if problem:
             return _err(problem, contract_error=True)
         if self.calls_made >= self.budget:
             return _err(f"search budget of {self.budget} calls is used up - give your final summary now")
 
         # --- policy: only enabled sources, never outside the user's year range ---
-        notes = []
+        notes = list(repair_notes)
         if args.source == "all":
             sources = self.enabled_sources
         elif args.source not in self.enabled_sources:
@@ -185,21 +235,21 @@ class VerifierToolContext:
         return _err(f"paper {paper_id!r} is not among the analyzed papers (it may be a made-up id)", unknown_id=True)
 
     def _get_paper_text(self, arguments: dict) -> tuple:
-        args, problem = _validate(GetPaperTextArgs, arguments)
+        args, problem, notes = _validate(GetPaperTextArgs, arguments)
         if problem:
             return _err(problem, contract_error=True)
         paper = self.by_id.get(args.paper_id)
         if paper is None:
             return self._unknown(args.paper_id)
-        max_chars = min(args.max_chars, CONFIG.verifier_text_chars)
+        max_chars = CONFIG.verifier_text_chars
         if paper.get("full_text"):
             kind, text = "full_text_excerpt", paper["full_text"][:max_chars]
         else:
             kind, text = "abstract", (paper.get("abstract") or "")[:max_chars]
         self.read_ids.add(args.paper_id)
         ctx = {"paper_id": args.paper_id, "title": paper.get("title"), "year": paper.get("year"),
-               "text_kind": kind, "text": text}
-        return json.dumps(ctx, ensure_ascii=False), {"ok": True, "n_items": 1, "text_kind": kind}
+               "text_kind": kind, "text": text, **({"harness_notes": notes} if notes else {})}
+        return json.dumps(ctx, ensure_ascii=False), {"ok": True, "n_items": 1, "text_kind": kind, "policy_notes": notes}
 
     @staticmethod
     def _passages(hits: list, max_chars: int = 900) -> list:
@@ -207,25 +257,27 @@ class VerifierToolContext:
                  "score": h["score"], "text": h["text"][:max_chars]} for h in hits]
 
     def _search_paper_chunks(self, arguments: dict) -> tuple:
-        args, problem = _validate(SearchPaperChunksArgs, arguments)
+        args, problem, notes = _validate(SearchPaperChunksArgs, arguments)
         if problem:
             return _err(problem, contract_error=True)
         if args.paper_id not in self.by_id:
             return self._unknown(args.paper_id)
         hits = self.store.search(args.query, paper_ids=[args.paper_id], k=args.k)
         self.read_ids.add(args.paper_id)
-        ctx = {"paper_id": args.paper_id, "query": args.query, "passages": self._passages(hits)}
-        return json.dumps(ctx, ensure_ascii=False), {"ok": True, "n_items": len(hits),
+        ctx = {"paper_id": args.paper_id, "query": args.query, "passages": self._passages(hits),
+               **({"harness_notes": notes} if notes else {})}
+        return json.dumps(ctx, ensure_ascii=False), {"ok": True, "n_items": len(hits), "policy_notes": notes,
                                                      "sections": sorted({h["section"] for h in hits})}
 
     def _search_corpus(self, arguments: dict) -> tuple:
-        args, problem = _validate(SearchCorpusArgs, arguments)
+        args, problem, notes = _validate(SearchCorpusArgs, arguments)
         if problem:
             return _err(problem, contract_error=True)
         ids = None if args.scope == "knowledge_base" else list(self.by_id)
         hits = self.store.search(args.query, paper_ids=ids, k=args.k)
         self.corpus_searches.append(args.query)
         ctx = {"query": args.query, "scope": args.scope, "n_papers_searched": "all stored" if ids is None else len(ids),
-               "passages": self._passages(hits, 600)}
+               "passages": self._passages(hits, 600), **({"harness_notes": notes} if notes else {})}
         return json.dumps(ctx, ensure_ascii=False), {"ok": True, "n_items": len(hits), "scope": args.scope,
+                                                     "policy_notes": notes,
                                                      "paper_ids_hit": sorted({h["paper_id"] for h in hits})}

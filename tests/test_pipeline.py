@@ -350,3 +350,47 @@ def test_markdown_link_email_is_redacted_everywhere():
     cleaned = outbound.enforce({"x": [text]}, "test")
     assert "@" not in json.dumps(cleaned)
     assert outbound.violations(cleaned) == []
+
+
+# ---------------------------------------------------------------------------
+# Tool-argument repair (harness): repair what is unambiguous, reject what is a real mistake
+# ---------------------------------------------------------------------------
+def _verifier_ctx():
+    import tools
+    papers = [{"id": "arxiv:0000.00001", "title": "T", "year": 2024, "abstract": "An abstract about few-shot NER."}]
+    return tools.VerifierToolContext(papers, store=None)
+
+
+def test_live_regression_max_chars_no_longer_costs_a_turn():
+    """qwen3:14b sent get_paper_text(max_chars=10000) in 18/183 live calls -> rejected (le=8000)
+    -> a wasted model turn each time. The knob is gone; the call now succeeds with a note."""
+    import metrics
+    metrics.reset()
+    text, entry = _verifier_ctx().execute("get_paper_text", {"paper_id": "arxiv:0000.00001", "max_chars": 10000})
+    assert entry["ok"] is True
+    assert "max_chars" in json.loads(text)["harness_notes"][0]
+    assert metrics.get("tool_args_invalid") == 0 and metrics.get("tool_args_repaired") == 1
+    assert "max_chars" not in json.dumps(__import__("tools").GET_PAPER_TEXT_SPEC)   # not offered to the model
+
+
+def test_out_of_range_and_string_numbers_are_repaired(offline):
+    import tools
+    ctx = tools.SearchToolContext(enabled_sources=["arxiv"])
+    text, entry = ctx.execute("search_papers", {"query": "few-shot NER", "source": "arxiv", "limit": "500"})
+    assert entry["ok"] is True
+    notes = " ".join(json.loads(text)["policy_notes"])
+    assert "converted string to integer" in notes and "capped at 50" in notes
+    assert entry["effective_args"]["sources"] == ["arxiv"]
+
+
+def test_real_mistakes_are_still_rejected(offline):
+    import tools
+    ctx = tools.SearchToolContext(enabled_sources=["arxiv"])
+    _, e1 = ctx.execute("search_papers", {"query": "x"})                                 # too short: no safe repair
+    _, e2 = ctx.execute("search_papers", {"query": "few-shot NER", "source": "scopus"})   # source doesn't exist
+    _, e3 = ctx.execute("search_papers", {"query": "few-shot NER", "year_from": 2024, "year_to": 2020})
+    assert all(e.get("contract_error") for e in (e1, e2, e3))
+    _, e4 = _verifier_ctx().execute("get_paper_text", {"paper_id": "arxiv:9999.99999"})  # made-up id
+    assert e4.get("unknown_id") and not e4["ok"]
+    _, e5 = _verifier_ctx().execute("get_paper_text", {"paper_id": "not-an-id"})          # malformed id
+    assert e5.get("contract_error")
