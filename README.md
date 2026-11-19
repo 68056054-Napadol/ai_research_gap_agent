@@ -254,11 +254,17 @@ default — you only need to touch the ones relevant to your setup.
 | `PDF_CACHE_DIR` | `pdf_cache` | Where converted PDF text is cached |
 | `PDF_MAX_PAGES` | `40` | Per-PDF page cap |
 | `PDF_MAX_DOWNLOAD_MB` | `25` | Per-PDF size cap |
-| `SEMANTIC_SCHOLAR_API_KEY` | *(empty)* | Optional — raises Semantic Scholar's rate limit |
-| `OPENALEX_API_KEY` / `OPENALEX_MAILTO` | *(empty)* | Optional — `OPENALEX_MAILTO` puts you in OpenAlex's more-reliable "polite pool," recommended even though it's not strictly required |
+| `SEMANTIC_SCHOLAR_API_KEY` | *(empty)* | Free key ([request](https://www.semanticscholar.org/product/api#api-key)) — 1 request/s of your own; without it every call shares one public pool and is often refused (429) |
+| `OPENALEX_API_KEY` | *(empty)* | Free key ([get one](https://openalex.org/settings/api)) — **required by OpenAlex since Feb 2026**; without it the daily allowance is tiny |
+| `OPENALEX_MAILTO` | *(empty)* | Optional, ignored by OpenAlex since keys replaced the polite pool. Placeholder values such as `you@example.com` are dropped |
+| `SOURCE_MAX_RETRIES` / `SOURCE_RETRY_MAX_WAIT` / `SOURCE_DISABLE_AFTER_FAILURES` | `3` / `10` / `3` | Retries on 429/5xx (Retry-After honoured), and how many failed calls in a row switch a source off for the rest of the run |
+| `RANKING_EMBEDDING` | *(= `RAG_EMBEDDING`)* | Embedding Node 3 ranks candidates with |
+| `SIMILARITY_THRESHOLD` | *(per model)* | Override the relevance cut-off; defaults per model in `embeddings.RANKING_THRESHOLDS` |
+| `HIGH_CONFIDENCE_MIN_PAPERS` / `HIGH_CONFIDENCE_MIN_SOURCES` | `8` / `2` | A gap can only be **High** when the run analysed this many papers from this many sources that answered |
+| `PRIVACY_LLM_ON_PAPERS` | `always` | `always` / `auto` / `never` — see [Privacy](#privacy-llm-extraction--decision-model) |
 | `UNPAYWALL_EMAIL` | *(empty)* | Reserved for a future Unpaywall connector — see "What to build next" |
 | `MAX_CANDIDATE_PAPERS` | `80` | Broad search pool size (metadata only, cheap) |
-| `MAX_DEEP_ANALYSIS_PAPERS` | `20` | How many papers get full extraction (the expensive tier) — overridable per-run via `--max-papers` or the web UI's slider |
+| `MAX_DEEP_ANALYSIS_PAPERS` | `8` | How many papers get full extraction (~45 s each on a local 14B model) (the expensive tier) — overridable per-run via `--max-papers` or the web UI's slider |
 | `MIN_PAPERS_BEFORE_RETRY` | `5` | Node 4's threshold for triggering a broader-search retry |
 | `MAX_RETRY_LOOPS` | `3` | Hard cap on retry loops, so a bad topic can't loop forever |
 
@@ -551,6 +557,14 @@ stored in state, reports, or `output/*.json` — papers keep only `n_authors`. E
 logged with the rule that fired and a masked form of the text (`J*** D**`), shown in the UI under
 **🛡️ Privacy decisions**. Try it live: `few-shot NER papers by Dr. <any name> for Thai`.
 
+Paper headers also get a deterministic **affiliation detector** (`privacy.affiliation_detect`):
+header lines naming an institution, and short lines ending in a country, are redacted without an
+LLM. `PRIVACY_LLM_ON_PAPERS=auto` would skip the header LLM call when these detectors plus the
+author list seem to cover everything — but `scripts/validate_header_privacy.py` on 12 real PDFs
+showed it skipping only 4/12 headers (57 s saved) while leaving 16 items the LLM would have
+redacted (2 author names among them). So the default stays `always`; `auto` is there for runs
+where speed matters more than a few leaked citation names.
+
 ## Contracts and deterministic sampling
 
 - `contracts.py`: one pydantic model per LLM output (keywords, extraction, gap proposal, verifier,
@@ -659,7 +673,7 @@ its model card prescribes (`embeddings.EMBEDDING_FORMATS`) - in the evaluation a
 | quote verified (extraction faithful to source) | 0.80 | 0.47 | **0.90** |
 | verifier read the cited sources | **1.00** | 0.92 | 0.83 |
 | contract pass on first try | 0.98 | 0.97 | 0.96 |
-| tool arguments valid | 0.83 → **1.00** after fix below | **1.00** | **1.00** |
+| tool arguments valid | 0.83 | **1.00** | **1.00** |
 | same answer when asked twice | 1.00 | 1.00 | 1.00 |
 
 → default stays **qwen3:14b**: fastest, no failed runs, faithful extraction, cheapest in tokens.
@@ -669,24 +683,34 @@ model profile (it cannot disable thinking and returns empty content under `forma
 calls per run (4× the tokens). Caveats: small sample; "gaps supported" is judged by each model's own
 verifier, so it is not comparable across models and is left out of the table.
 
-**Harness fix for qwen3:14b's invalid tool arguments.** All 18 of its 183 invalid calls were
-`get_paper_text(max_chars=10000)` against a schema capped at 8000. The fix removes that model-facing
-knob (the verifier's read length is now `VERIFIER_TEXT_CHARS`, set by the harness) and adds
-repair-before-validate (`tools.repair_arguments`: clamp to schema bounds, coerce numeric strings,
-drop unknown keys, and tell the model what was changed). Re-run with the same 2 topics × 2 runs
-(`evaluation/results/compare_models_20261119_004705.md`):
+## Quality fixes from a live app run
 
-| qwen3:14b | before | after |
-|---|---|---|
-| tool arguments valid | 0.83 | **1.00** (0 needed repair) |
-| verifier tool calls per run | 11–13 | **9** |
-| LLM calls per run | 19–25 | **18** |
-| seconds per run (mean) | 377 | **311** |
-| tokens (all runs) | 225k | **183k** |
-| quote verified / evidence coverage | 0.80 / 1.00 | 0.80 / 1.00 |
+A real run in the web UI ("automatic short answer grading with large language models") showed five
+problems. What changed, and what was measured:
 
-Caveat: the second run reused a warm PDF cache and knowledge base, so part of the speed-up is cache;
-the drop in tool and LLM calls comes from no longer retrying rejected `get_paper_text` calls.
+1. **Paper sources silently down.** Every Semantic Scholar and OpenAlex call got HTTP 429, so the
+   corpus was arXiv-only and nothing said so. `sources/net.py` now throttles per source, retries
+   429/5xx with backoff (Retry-After honoured), switches a source off after 3 failed calls in a row,
+   and records per-source health — shown on the search card, in the report, and used in (3).
+   Placeholder settings (`you@example.com`) are no longer sent. OpenAlex now requires a free API key
+   (Feb 2026); the UI warns when keys are missing.
+2. **Relevance cut-off never cut.** `evaluation/calibrate_ranking.py` on 136 hand-labelled
+   candidates (2 topics, `evaluation/data/`): ranking order was already good for every model
+   (AUC ≈ 0.99; the top 5 and top 8 were all on topic), but the 0.35 cut-off sat below the lowest
+   score bge-small ever gave (0.53), so 66/66 candidates "passed". Node 3 now ranks with the RAG
+   embedding (embeddinggemma, with its query/document formats) and a per-model cut-off at 95 %
+   on-topic recall (0.50 → 1/57 off-topic kept). arXiv queries now AND the topic words and filter
+   years server-side (the old `all:` query ORed them and pulled in genome and quantum-ML papers).
+3. **Overconfident gaps.** A counterexample now counts only if the verifier copies a sentence
+   from that paper's text verbatim (checked against what the tools returned); a gap lost to a
+   title that "may be relevant" no longer happens. Absence claims are capped below High when the
+   run analysed < 8 papers or < 2 sources answered (`confidence_caps`, shown per gap). In the
+   re-run, a counterexample was accepted on a verified sentence ("…spanning various languages…").
+4. **Slow privacy pass.** Measured instead of assumed — see [Privacy](#privacy-llm-extraction--decision-model):
+   skipping the header LLM call leaked names, so it stays on; the deterministic affiliation
+   detector was added on top.
+5. **UI.** One click runs (form), default 8 papers, and the trend summary names papers by short
+   title (`Grade Guard (2025)`) instead of ids or the internal "Quote verified" flag.
 
 ## What to build next
 

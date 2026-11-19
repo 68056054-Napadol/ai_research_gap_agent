@@ -53,6 +53,9 @@ Write a short synthesis (3-5 paragraphs) covering:
 4. Any explicit disagreements or contradictions between papers.
 
 Ground every claim in the table above — do not introduce information not present in it.
+Refer to papers by their short name in the "Paper" column, e.g. "Grade Guard (2025)" - never by an
+id. Findings marked "(not confirmed in the text)" could not be matched to the paper itself: rely on
+them less, but do not discuss this marker, how the table was built, or any checking process.
 """
 
 GAP_ANALYSIS_PROMPT = """You are identifying research gaps from a literature comparison, to
@@ -107,7 +110,9 @@ Steps:
    - counterexample_found: did step 2 return a passage showing a paper that ALREADY DOES what the
      claim says is missing? IMPORTANT: for a claim like "X has not been explored", finding NO
      paper that does X is NOT a counterexample - it is consistent with the claim. Only a passage
-     that actually does X counts. If true, give that passage's paper_id.
+     that actually does X counts. A title that merely sounds related is NOT enough. If true, give
+     that passage's paper_id AND copy, word for word, the sentence from that passage that shows the
+     paper does X (counterexample_quote). No exact sentence -> counterexample_found is false.
    - overstated: does the claim go further than the source text allows (e.g. "never" when the
      papers only say "rarely", or a qualifier none of the papers mention)?
 4. Then answer with ONLY a JSON object, no other text:
@@ -116,6 +121,7 @@ Steps:
   "cited_papers_relevant": true or false,
   "counterexample_found": true or false,
   "counterexample_paper_id": "paper id of the counterexample, or null",
+  "counterexample_quote": "verbatim sentence from that paper's passage showing it does X, or null",
   "overstated": true or false,
   "notes": "1-2 sentences on what you checked in the source text, including the counterexample search",
   "unsupported_aspects": "specific part of the claim not backed by the source text, or 'none'",

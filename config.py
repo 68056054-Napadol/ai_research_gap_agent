@@ -17,6 +17,30 @@ def _float(name: str, default: float) -> float:
     return float(os.getenv(name, default))
 
 
+def _optional_float(name: str):
+    raw = os.getenv(name, "").split("#", 1)[0].strip()
+    return float(raw) if raw else None
+
+
+# Values copied from .env.example ("you@example.com", "your-key-here") are not real settings.
+# Sending them is worse than sending nothing: a fake contact email or key looks configured
+# while every request still lands in the anonymous, rate-limited pool.
+_PLACEHOLDER_MARKERS = ("example.com", "example.org", "your-", "your_", "<", "xxx", "changeme")
+
+
+def _privacy_mode(raw: str) -> str:
+    v = raw.split("#", 1)[0].strip().lower()
+    v = {"true": "always", "1": "always", "yes": "always", "false": "never", "0": "never", "no": "never"}.get(v, v)
+    return v if v in ("auto", "always", "never") else "always"
+
+
+def _secret(name: str) -> str:
+    raw = os.getenv(name, "").split(" #", 1)[0].strip().strip('"').strip("'")
+    if not raw or raw.lower() in ("none", "null", "false") or any(m in raw.lower() for m in _PLACEHOLDER_MARKERS):
+        return ""
+    return raw
+
+
 @dataclass
 class Config:
     # --- LLM backend ---
@@ -60,10 +84,16 @@ class Config:
     verifier_text_chars: int = _int("VERIFIER_TEXT_CHARS", 3000)   # source text returned per get_paper_text call
 
     # --- Privacy (decision model + LLM sensitive-info extraction, see privacy.py) ---
-    # Run the LLM entity extractor on each paper's header (where author names/affiliations/emails
-    # live). Regex + metadata-name redaction always runs regardless; this adds 1 fast-tier call per
-    # full-text paper.
-    privacy_llm_on_papers: bool = os.getenv("PRIVACY_LLM_ON_PAPERS", "true").strip().lower() in ("1", "true", "yes")
+    # LLM entity extractor on each paper's header (where author names/affiliations/emails live).
+    # Regex + metadata-name + affiliation-line redaction always runs. Modes:
+    #   always - one fast-tier call per full-text paper (default)
+    #   auto   - call the LLM only when the deterministic detectors can't vouch for the header.
+    #            Measured on 12 real PDFs (scripts/validate_header_privacy.py): it skipped the LLM on
+    #            4/12 (57 s saved) but those 4 kept 16 items the LLM would have redacted (2 author
+    #            names, cited authors, affiliations) - so it is opt-in, not the default.
+    #   never  - deterministic detectors only
+    # Legacy true/false map to always/never.
+    privacy_llm_on_papers: str = _privacy_mode(os.getenv("PRIVACY_LLM_ON_PAPERS", "always"))
     privacy_header_chars: int = _int("PRIVACY_HEADER_CHARS", 2500)
 
     # --- RAG knowledge base (rag_store.py) - persists across runs = KM ---
@@ -80,9 +110,17 @@ class Config:
     tracing_enabled: bool = os.getenv("TRACING_ENABLED", "true").strip().lower() in ("1", "true", "yes")
 
     # --- Data source keys (all optional) ---
-    semantic_scholar_api_key: str = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
-    openalex_api_key: str = os.getenv("OPENALEX_API_KEY", "")
-    openalex_mailto: str = os.getenv("OPENALEX_MAILTO", "")
+    # Semantic Scholar: free key -> 1 request/s of your own instead of the shared public pool
+    # (https://www.semanticscholar.org/product/api#api-key). OpenAlex: an API key is required since
+    # Feb 2026 (free, https://openalex.org/settings/api); the old mailto "polite pool" is ignored.
+    semantic_scholar_api_key: str = _secret("SEMANTIC_SCHOLAR_API_KEY")
+    openalex_api_key: str = _secret("OPENALEX_API_KEY")
+    openalex_mailto: str = _secret("OPENALEX_MAILTO")
+    # Rate limits: retries with backoff on 429/5xx (Retry-After honoured, capped), and a source that
+    # fails this many times without ever answering is switched off for the rest of the run.
+    source_max_retries: int = _int("SOURCE_MAX_RETRIES", 3)
+    source_retry_max_wait: float = _float("SOURCE_RETRY_MAX_WAIT", 10.0)
+    source_disable_after_failures: int = _int("SOURCE_DISABLE_AFTER_FAILURES", 3)
     unpaywall_email: str = os.getenv("UNPAYWALL_EMAIL", "")
 
     # --- Which sources are enabled for this run ---
@@ -99,7 +137,8 @@ class Config:
 
     # --- Paper-count / cost-control budget (architecture doc §7.4) ---
     max_candidate_papers: int = _int("MAX_CANDIDATE_PAPERS", 80)      # broad search pool, metadata only
-    max_deep_analysis_papers: int = _int("MAX_DEEP_ANALYSIS_PAPERS", 20)  # papers that get full extraction
+    max_deep_analysis_papers: int = _int("MAX_DEEP_ANALYSIS_PAPERS", 8)  # papers that get full extraction
+    # (8: ~10 min on a local 14B model. Each extra paper costs ~45 s - extraction + PDF + RAG.)
 
     # --- Sufficiency-check retry loop (architecture doc §2.2, Node 4) ---
     min_papers_before_retry: int = _int("MIN_PAPERS_BEFORE_RETRY", 5)
@@ -107,11 +146,24 @@ class Config:
 
     # --- Relevance ranking (architecture doc §7.2) ---
     embedding_model_name: str = "BAAI/bge-small-en-v1.5"
-    similarity_threshold: float = _float("SIMILARITY_THRESHOLD", 0.35)
+    # Node 3 ranks candidates with this embedding ("<backend>:<model>", same format as
+    # RAG_EMBEDDING). Default: the RAG model, so ranking and retrieval agree and use the model
+    # that won evaluation/compare_embeddings.py.
+    ranking_embedding: str = os.getenv("RANKING_EMBEDDING", "").split("#", 1)[0].strip() or os.getenv(
+        "RAG_EMBEDDING", "sentence_transformers:BAAI/bge-small-en-v1.5").split("#", 1)[0].strip()
+    # Cosine scores are not comparable across models, so the cut-off is per model
+    # (embeddings.RANKING_THRESHOLDS, calibrated by evaluation/calibrate_ranking.py on hand-labelled
+    # candidates). SIMILARITY_THRESHOLD overrides it.
+    similarity_threshold: float | None = _optional_float("SIMILARITY_THRESHOLD")
     llm_rerank_top_n: int = _int("LLM_RERANK_TOP_N", 40)  # only re-rank the top N by embedding score
 
     # --- Confidence scoring (architecture doc §7.3) ---
     min_supporting_papers_for_gap: int = 2
+    # A gap is mostly an absence claim ("nobody has done X"), and absence is only as convincing as
+    # the search behind it. "High" needs at least this many analysed papers and this many paper
+    # sources that actually answered; otherwise the score is capped just below High.
+    high_confidence_min_papers: int = _int("HIGH_CONFIDENCE_MIN_PAPERS", 8)
+    high_confidence_min_sources: int = _int("HIGH_CONFIDENCE_MIN_SOURCES", 2)
 
     # --- Output ---
     output_dir: str = "output"

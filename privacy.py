@@ -303,14 +303,107 @@ def scrub_paper(paper: dict) -> list:
     return records
 
 
-def scrub_full_text(text: str, paper_id: str) -> tuple:
-    """Full text: regex + gazetteer over everything, LLM extractor over the header (title block,
-    author names, affiliations, emails live in the first page)."""
+# ---------------------------------------------------------------------------
+# Paper headers: deterministic affiliation/address lines + "does this header still need the LLM?"
+# ---------------------------------------------------------------------------
+_ABSTRACT_HEADING_RE = re.compile(r"(?im)^[\W_]{0,8}abstract\b")
+_AFFIL_RE = re.compile(
+    r"(Universit|Institut|Laborator|\bLabs?\b|Department|\bDept\b|College|School of|Faculty|Academy|"
+    r"Research (?:Center|Centre|Institute|Lab)|Cent(?:er|re) for|\bInc\b|\bLtd\b|Corporation|\bCorp\b|GmbH|"
+    r"\bLLC\b|Hospital|Foundation|Polytechnic|\bIIT\b|Google|Microsoft|\bMeta\b|DeepMind|Amazon|\bIBM\b|"
+    r"NVIDIA|Alibaba|Tencent|Baidu|Huawei|ByteDance|Samsung|OpenAI|"
+    r"มหาวิทยาลัย|สถาบัน|คณะ|ภาควิชา|ศูนย์)", re.I)
+_COUNTRIES = {
+    "usa", "u.s.a.", "united states", "united states of america", "uk", "united kingdom", "england", "canada",
+    "china", "p.r. china", "pr china", "japan", "korea", "south korea", "republic of korea", "taiwan", "hong kong",
+    "singapore", "india", "pakistan", "bangladesh", "thailand", "vietnam", "viet nam", "indonesia", "malaysia",
+    "philippines", "australia", "new zealand", "germany", "france", "italy", "spain", "portugal", "netherlands",
+    "the netherlands", "belgium", "switzerland", "austria", "sweden", "norway", "denmark", "finland", "poland",
+    "czech republic", "czechia", "greece", "turkey", "israel", "iran", "saudi arabia", "uae",
+    "united arab emirates", "qatar", "egypt", "nigeria", "kenya", "south africa", "brazil", "mexico", "argentina",
+    "chile", "colombia", "russia", "ukraine", "ireland", "scotland", "hungary", "romania", "slovakia", "slovenia",
+    "estonia", "latvia", "lithuania", "ethiopia", "morocco", "tunisia", "nepal", "sri lanka", "ไทย", "ประเทศไทย"}
+_NAME_SEGMENT_RE = re.compile(r"^[A-Z][a-zA-Z'\u2019-]+(?:\s+(?:[A-Z]\.|[A-Z][a-zA-Z'\u2019-]+)){1,3}$")
+_NON_LATIN_LETTER_RE = re.compile(r"[^\W\d_a-zA-Z\u00C0-\u024F]")
+_MARKUP_RE = re.compile(r"\[(?:AUTHOR|AFFILIATION|CONTACT|PERSON|CITED_AUTHOR)\]|[*_#>`|\[\]()^{}]|[\d\u2020\u2021\u00a7\u00b6\u2217]+")
+
+
+def header_region(text: str) -> str:
+    """The part of a paper before its Abstract heading (title, authors, affiliations, emails),
+    capped at privacy_header_chars."""
+    head = text[:CONFIG.privacy_header_chars]
+    m = _ABSTRACT_HEADING_RE.search(head)
+    return head[:m.start()] if m else head
+
+
+def _header_lines(head: str, title: str = "") -> list:
+    title_key = re.sub(r"\W+", "", (title or "").lower())[:40]
+    out = []
+    for i, line in enumerate(head.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        key = re.sub(r"\W+", "", line.lower())
+        if line.startswith("#") or (title_key and key and (key.startswith(title_key) or title_key.startswith(key[:40]))):
+            continue   # the title is not personal data
+        out.append(line)
+    return out
+
+
+def affiliation_detect(head: str, title: str = "") -> list:
+    """Whole header lines that name an institution, and short lines that end in a country
+    (postal addresses). Deterministic stand-in for what the LLM mostly found in paper headers."""
+    ents = []
+    for line in _header_lines(head, title):
+        bare = line.strip("*_ ").rstrip(".")
+        if len(bare) > 240:
+            continue
+        if _AFFIL_RE.search(bare):
+            ents.append({"text": bare, "type": "ORGANIZATION", "role": "affiliation", "detected_by": "regex", "confidence": 0.9})
+        elif len(bare) <= 90 and bare.split(",")[-1].strip().lower().strip(".") in _COUNTRIES:
+            ents.append({"text": bare, "type": "ADDRESS", "role": "affiliation", "detected_by": "regex", "confidence": 0.85})
+    return ents
+
+
+def header_needs_llm(head_redacted: str, has_author_metadata: bool, title: str = "") -> str:
+    """'' when regex/metadata/affiliation detectors can vouch for this (already redacted) header,
+    else the reason the LLM pass is still needed."""
+    if not has_author_metadata:
+        return "source gave no author list"
+    if _NON_LATIN_LETTER_RE.search(_MARKUP_RE.sub(" ", head_redacted)):
+        return "non-Latin script in the header"
+    for line in _header_lines(head_redacted, title):
+        for seg in re.split(r",|;|\band\b|&", _MARKUP_RE.sub(" ", line)):
+            seg = " ".join(seg.split())
+            if seg and seg.lower() not in _COUNTRIES and _NAME_SEGMENT_RE.match(seg):
+                return "a name-like line survived the deterministic detectors"
+    return ""
+
+
+def scrub_full_text(text: str, paper_id: str, has_author_metadata: bool = True, title: str = "") -> tuple:
+    """Full text: regex + gazetteer over everything; affiliation/address lines in the header; the
+    LLM extractor over the header only when needed (CONFIG.privacy_llm_on_papers)."""
     header_len = CONFIG.privacy_header_chars
     head, body = text[:header_len], text[header_len:]
-    llm_ents = llm_detect(head, "paper_text") if CONFIG.privacy_llm_on_papers else []
-    head, rec_h = decide_and_redact(head, regex_detect(head) + metadata_detect(head) + llm_ents,
-                                    "paper_text", f"{paper_id}:full_text_header")
+    region = header_region(head)
+    det = regex_detect(head) + metadata_detect(head) + affiliation_detect(region, title)
+    mode = CONFIG.privacy_llm_on_papers
+    llm_ents, reason = [], ""
+    if mode == "always":
+        reason = "PRIVACY_LLM_ON_PAPERS=always"
+    elif mode == "auto":
+        if "[AUTHOR]" in region and "[AFFILIATION]" in region:
+            reason = ""          # header already scrubbed (cached PDF from an earlier run)
+        else:
+            probe, _ = decide_and_redact(region, det, "paper_text", f"{paper_id}:probe", count_metrics=False)
+            reason = header_needs_llm(probe, has_author_metadata, title)
+    if reason:
+        llm_ents = llm_detect(head, "paper_text")
+        metrics.inc("privacy_header_llm_calls")
+        logger.info("    [privacy] header LLM check for %s: %s", paper_id, reason)
+    elif mode != "never":
+        metrics.inc("privacy_header_llm_skipped")
+    head, rec_h = decide_and_redact(head, det + llm_ents, "paper_text", f"{paper_id}:full_text_header")
     # names the LLM found in the header (authors) are also redacted wherever they recur in the body
     body_ents = regex_detect(body) + metadata_detect(body) + [e for e in llm_ents if e["text"] in body]
     body, rec_b = decide_and_redact(body, body_ents, "paper_text", f"{paper_id}:full_text_body")

@@ -71,6 +71,7 @@ class AgentState(TypedDict, total=False):
     candidate_papers: list      # list[Paper], accumulated across retry loops
     search_summary: str         # the search agent's own final message
     search_used_fallback: bool  # True if the model made no tool calls and the harness searched for it
+    source_health: dict         # per source: ok/failed/retries/rate_limited/disabled/last_error (sources/net.py)
 
     # --- Node 3 ---
     ranked_papers: list         # list[Paper], sorted by similarity_score desc
@@ -87,6 +88,7 @@ class AgentState(TypedDict, total=False):
     # --- Node 6 ---
     comparison_table: str       # markdown table, built from paper_extracts
     trend_summary: str
+    paper_labels: dict          # {paper_id: "Short title (year)"} - how the summary names papers
 
     # --- Node 7 ---
     gap_candidates: list        # list[GapCandidate]

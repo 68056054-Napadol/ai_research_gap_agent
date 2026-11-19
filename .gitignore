@@ -3,7 +3,7 @@ __pycache__/
 .venv/
 .env
 output/
-pdf_cache/
+pdf_cache*/
 rag_store/
 _live_test/
 evaluation/results/*.json

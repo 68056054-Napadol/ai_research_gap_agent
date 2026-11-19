@@ -20,6 +20,7 @@ import tools
 from config import CONFIG
 from contracts import GapProposalOutput, KeywordOutput, PaperExtractOutput, VerifierOutput
 from sources import search_all, pdf_extract, _dedupe
+from sources import net as source_net
 from state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ def sanitize_input(state: AgentState) -> dict:
     entity (entity_action) and for the whole input (input_action). Only the redacted topic is
     kept in state."""
     privacy.reset_run()
+    source_net.reset_run()
     result = privacy.sanitize_topic(state["research_topic"])
     d = result["decision"]
     logger.info("Input decision: %s (rule %s) - %d entity decision(s)%s", d["action"], d["rule"],
@@ -140,8 +142,14 @@ def search_sources(state: AgentState) -> dict:
     merged = _dedupe((state.get("candidate_papers") or []) + ctx.papers)[: CONFIG.max_candidate_papers]
     logger.info("Search agent done: %d tool call(s), %d unique papers this round, %d total candidates",
                 ctx.calls_made, len(ctx.papers), len(merged))
+    health = source_net.source_health()
+    for src in ctx.enabled_sources:
+        h = health.get(src)
+        if h and h["ok"] == 0:
+            logger.warning("Source %s returned nothing usable this run: %s", src, h["last_error"] or "no response")
     return {
         "candidate_papers": merged,
+        "source_health": health,
         "search_summary": result.final_text.strip(),
         "search_used_fallback": used_fallback,
         "tool_trace": (state.get("tool_trace") or []) + trace,
@@ -157,8 +165,8 @@ def filter_and_rank(state: AgentState) -> dict:
                 len(state["candidate_papers"]))
     ranked = embeddings.rank_by_similarity(state["research_topic"], state["candidate_papers"])
     above_threshold = embeddings.filter_by_threshold(ranked)
-    logger.info("%d/%d papers passed similarity threshold %.2f",
-                len(above_threshold), len(ranked), CONFIG.similarity_threshold)
+    logger.info("%d/%d papers passed similarity threshold %.2f (%s)",
+                len(above_threshold), len(ranked), embeddings.ranking_threshold(), CONFIG.ranking_embedding)
 
     # NOTE (architecture doc §7.2 stage 2 - optional LLM re-rank): for course-scope speed this
     # scaffold ships with embedding-only ranking. To add the semantic re-rank pass, take the
@@ -271,7 +279,9 @@ def extract_paper_data(state: AgentState) -> dict:
                 # Privacy: author names / emails / affiliations are redacted BEFORE the text reaches
                 # the extraction LLM, the verifier tool, the knowledge base, the UI or state.json -
                 # and the on-disk PDF cache is overwritten with the redacted version.
-                full_text, recs = privacy.scrub_full_text(full_text, paper["id"])
+                full_text, recs = privacy.scrub_full_text(full_text, paper["id"],
+                                                           has_author_metadata=paper.get("n_authors", 0) > 0,
+                                                           title=paper.get("title", ""))
                 privacy_records.extend(recs)
                 pdf_extract.overwrite_cache(paper["id"], full_text)
                 paper["full_text"] = full_text  # cache on the paper dict for the rest of this run
@@ -352,50 +362,98 @@ def extract_paper_data(state: AgentState) -> dict:
 # ---------------------------------------------------------------------------
 # Node 6 — Cross-Paper Comparison & Trend Synthesis
 # ---------------------------------------------------------------------------
+def short_title(title: str, max_words: int = 6) -> str:
+    """'Grade Guard: A Smart System for ...' -> 'Grade Guard'; long titles cut to a few words."""
+    t = " ".join((title or "").split()).strip('"\u201c\u201d ')
+    head = re.split(r"\s*[:\u2013\u2014]\s+|\s+-{1,2}\s+", t, maxsplit=1)[0]
+    words = head.split()
+    if len(words) > max_words:
+        head = " ".join(words[:max_words]) + "..."
+    return head or "untitled"
+
+
+def paper_labels(papers: list) -> dict:
+    """{paper_id: 'Short title (year)'}; duplicate short names get a letter so they stay distinct."""
+    labels, used = {}, {}
+    for p in papers:
+        base = f"{short_title(p.get('title', ''))} ({p.get('year', 'n.d.')})"
+        n = used.get(base, 0)
+        used[base] = n + 1
+        labels[p["id"]] = base if n == 0 else f"{base[:-1]}{chr(97 + n)})"
+    return labels
+
+
+def replace_ids_with_labels(text: str, labels: dict) -> str:
+    """Safety net for the user-facing summary: any raw id the model still wrote becomes its name."""
+    for pid in sorted(labels, key=len, reverse=True):
+        text = text.replace(pid, labels[pid])
+    return text
+
+
 def compare_papers(state: AgentState) -> dict:
     logger.info("Building comparison table from %d extracted papers", len(state["paper_extracts"]))
     by_id = {p["id"]: p for p in state["selected_papers"]}
+    labels = paper_labels([by_id[ex["paper_id"]] for ex in state["paper_extracts"] if ex["paper_id"] in by_id])
+    # Two views of the same rows: the id table is for gap analysis (gaps must cite ids) and the UI;
+    # the trend synthesis gets short names, so the summary a person reads names papers, not ids.
     rows = ["| Paper | Year | Method | Dataset | Key findings | Quote verified |",
             "|---|---|---|---|---|---|"]
+    named = ["| Paper | Method | Dataset | Key findings |", "|---|---|---|---|"]
     for ex in state["paper_extracts"]:
         p = by_id.get(ex["paper_id"], {})
         # "Quote verified" = extraction-quote grounding (README "Fact-checking"): whether the
         # supporting_quote the LLM gave for key_findings was actually found verbatim in the
-        # source text (Node 5). Included in the table itself (not just the UI) so the strong-tier
-        # LLM synthesizing trends below can see which findings are on solid footing.
+        # source text (Node 5).
         quote_flag = "✅ yes" if ex.get("quote_verified") else "⚠️ no"
         rows.append(
             f"| {ex['paper_id']} | {p.get('year', '?')} | {ex.get('method', '')} "
             f"| {ex.get('dataset', '')} | {ex.get('key_findings', '')} | {quote_flag} |"
         )
+        findings = ex.get("key_findings", "") + ("" if ex.get("quote_verified") else " (not confirmed in the text)")
+        named.append(f"| {labels.get(ex['paper_id'], ex['paper_id'])} | {ex.get('method', '')} "
+                     f"| {ex.get('dataset', '')} | {findings} |")
     table = "\n".join(rows)
 
     logger.info("Calling strong-tier LLM to synthesize trends across papers...")
-    prompt = prompts.COMPARE_PROMPT.format(topic=state["research_topic"], comparison_table=table)
+    prompt = prompts.COMPARE_PROMPT.format(topic=state["research_topic"], comparison_table="\n".join(named))
     trend_summary = llm_client.call(prompt, tier="strong", purpose="synthesize-trends")
+    trend_summary = replace_ids_with_labels(trend_summary, labels)
     # cheap redaction now (regex + this run's author list) so no intermediate view - UI card, log -
     # ever shows a name; the LLM-based pass on the final answer happens in privacy_guard
     trend_summary, recs = privacy.sanitize(trend_summary, "final_answer", "trend_summary(draft)", use_llm=False)
     logger.info("Trend synthesis complete (%d characters)", len(trend_summary))
 
-    return {"comparison_table": table, "trend_summary": trend_summary,
+    return {"comparison_table": table, "trend_summary": trend_summary, "paper_labels": labels,
             "privacy_log": (state.get("privacy_log") or []) + recs}
 
 
 # ---------------------------------------------------------------------------
 # Node 7 — Gap Analysis + Verifier -> confidence-scored gap candidates
 # ---------------------------------------------------------------------------
-def verifier_decision(facts: dict, counterexample_ids_seen: set) -> tuple:
+MIN_COUNTEREXAMPLE_QUOTE_CHARS = 30   # a few words like "short answer grading" prove nothing
+
+
+def verifier_decision(facts: dict, shown_text) -> tuple:
     """Deterministic verdict from the verifier's reported facts (the LLM extracts, code decides -
-    same pattern as the privacy decision model). Returns (supported, reason)."""
+    same pattern as the privacy decision model). Returns (supported, reason).
+
+    shown_text: {paper_id: [text the tools returned for it]} (a plain set of ids is accepted too).
+    A counterexample only counts when the model names a paper the tools actually showed it AND
+    copies a sentence from that paper's text verbatim. A live run lost a gap to a "counterexample"
+    the verifier itself described as a title that "may be relevant"."""
+    if not isinstance(shown_text, dict):
+        shown_text = {pid: [] for pid in (shown_text or ())}
     if not facts.get("cited_papers_relevant"):
         return False, "cited papers do not concern the claim (topic or qualifier)"
     if facts.get("counterexample_found"):
         cid = facts.get("counterexample_paper_id")
-        if cid and cid not in counterexample_ids_seen:
-            # the model named a counterexample paper the corpus search never returned - don't trust it
-            return True, f"counterexample {cid} was not among the passages search_corpus returned - ignored"
-        return False, f"counterexample found in the corpus ({cid or 'id not given'})"
+        if not cid or cid not in shown_text:
+            # the model named a counterexample paper the tools never returned - don't trust it
+            return True, f"counterexample {cid or '(no id)'} was not among the passages the tools returned - ignored"
+        quote = (facts.get("counterexample_quote") or "").strip()
+        if len(quote) < MIN_COUNTEREXAMPLE_QUOTE_CHARS or not _quote_verified(quote, " \n".join(shown_text[cid])):
+            return True, f"counterexample {cid} claimed without a verbatim sentence from its text - ignored"
+        return False, f"counterexample found in the corpus ({cid}), quote verified against its text"
     if facts.get("overstated"):
         return False, "claim is overstated relative to the source text"
     return True, "cited papers relevant, no counterexample in the corpus, not overstated"
@@ -424,15 +482,38 @@ def _verify_with_tools(gap: dict, supporting_ids: list, extracts_by_id: dict, se
         contexts = "\n".join(t["result_preview"] for t in loop.trace if t.get("ok"))
         verdict = llm_client.call_json(prompt + "\n\nSource text already retrieved with get_paper_text:\n"
                                        + contexts, tier="strong", schema=VerifierOutput, purpose="repair-verifier-answer")
-    seen = {pid for t in loop.trace if t.get("tool_name") == "search_corpus" for pid in t.get("paper_ids_hit", [])}
     llm_opinion = verdict.get("supported")
-    verdict["supported"], verdict["decision_reason"] = verifier_decision(verdict, seen)
+    verdict["supported"], verdict["decision_reason"] = verifier_decision(verdict, ctx.shown_text)
+    verdict["counterexample_verified"] = bool(verdict.get("counterexample_found")) and not verdict["supported"] \
+        and "quote verified" in verdict["decision_reason"]
+    if verdict.get("counterexample_found") and not verdict["counterexample_verified"]:
+        metrics.inc("verifier_counterexample_rejected")
     verdict["llm_opinion"] = llm_opinion
     if llm_opinion is not None and llm_opinion != verdict["supported"]:
         metrics.inc("verifier_llm_disagreed_with_rule")
         logger.info("    verifier facts -> supported=%s (%s); the model's own opinion was %s",
                     verdict["supported"], verdict["decision_reason"], llm_opinion)
     return verdict, loop.trace, sorted(ctx.read_ids), list(ctx.corpus_searches)
+
+
+CONFIDENCE_CAP_SCORE = 70.0   # just below the High band (>= 75)
+
+
+def _confidence_caps(state: dict) -> list:
+    """Reasons the search behind this run was too narrow to call an absence claim 'High'."""
+    caps = []
+    n_analyzed = len(state.get("paper_extracts") or [])
+    if n_analyzed < CONFIG.high_confidence_min_papers:
+        caps.append(f"only {n_analyzed} papers analysed (High needs >= {CONFIG.high_confidence_min_papers})")
+    health = state.get("source_health")
+    if health:   # empty = no source went through sources/net.py (offline fakes) - nothing to judge
+        answered = sorted(s for s, h in health.items() if h.get("ok", 0) > 0)
+        if len(answered) < CONFIG.high_confidence_min_sources:
+            failed = sorted(s for s, h in health.items() if h.get("ok", 0) == 0)
+            caps.append(f"papers came from {', '.join(answered) or 'no source'} only"
+                        + (f" ({', '.join(failed)} did not answer)" if failed else "")
+                        + f" - High needs >= {CONFIG.high_confidence_min_sources} sources")
+    return caps
 
 
 def analyze_gaps(state: AgentState) -> dict:
@@ -507,6 +588,9 @@ def analyze_gaps(state: AgentState) -> dict:
         else:
             verifier_score = 5
         confidence_score = evidence_count_score + recency_score + verifier_score
+        caps = _confidence_caps(state)
+        if caps and confidence_score > CONFIDENCE_CAP_SCORE:
+            confidence_score = CONFIDENCE_CAP_SCORE
         confidence_level = "High" if confidence_score >= 75 else "Medium" if confidence_score >= 45 else "Low"
         logger.info("    -> verdict supported=%s, read %d/%d sources, confidence=%s (%.1f/100)",
                     verdict.get("supported"), len(read_ids), len(supporting_ids), confidence_level, confidence_score)
@@ -518,9 +602,11 @@ def analyze_gaps(state: AgentState) -> dict:
             "rationale": gap.get("rationale", ""),
             "confidence_score": round(confidence_score, 1),
             "confidence_level": confidence_level,
+            "confidence_caps": caps,
             "verifier_supported": bool(verdict.get("supported")),
             "verifier_facts": {k: verdict.get(k) for k in ("cited_papers_relevant", "counterexample_found",
-                                                          "counterexample_paper_id", "overstated")},
+                                                          "counterexample_paper_id", "counterexample_quote",
+                                                          "counterexample_verified", "overstated")},
             "verifier_decision_reason": verdict.get("decision_reason", ""),
             "verifier_notes": verdict.get("notes", ""),
             "unsupported_aspects": verdict.get("unsupported_aspects", ""),
@@ -530,6 +616,14 @@ def analyze_gaps(state: AgentState) -> dict:
             "dropped_ids": dropped,
         })
 
+    caps = _confidence_caps(state)
+    if caps:
+        logger.info("Confidence capped below High for this run: %s", "; ".join(caps))
+    # what a person reads names papers; the ids stay in supporting_paper_ids / supporting_papers
+    labels = state.get("paper_labels") or paper_labels(state["selected_papers"])
+    for g in verified:
+        for k in ("rationale", "verifier_notes", "unsupported_aspects"):
+            g[k] = replace_ids_with_labels(g.get(k) or "", labels)
     logger.info("Gap analysis complete: %d/%d candidates passed verification", len(verified), len(raw_candidates))
     return {"gap_candidates": verified, "tool_trace": trace,
             "privacy_log": (state.get("privacy_log") or []) + early_privacy}

@@ -17,6 +17,14 @@ from graph import build_graph
 from logging_utils import configure_console_logging
 
 
+def source_health_md(health: dict) -> str:
+    parts = []
+    for src, h in sorted(health.items()):
+        parts.append(f"{src}: answered" + (f" ({h['retries']} retries)" if h.get("retries") else "")
+                     if h.get("ok") else f"{src}: no results - {h.get('last_error') or 'no answer'}")
+    return "Sources: " + "; ".join(parts)
+
+
 def render_report(state: dict) -> str:
     decision = state.get("input_decision") or {}
     lines = [f"# Research Gap Report: {state['research_topic']}", ""]
@@ -29,6 +37,7 @@ def render_report(state: dict) -> str:
         f"Papers analyzed: {len(state.get('selected_papers', []))} "
         f"(from {len(state.get('candidate_papers', []))} candidates found)",
         "",
+        *([source_health_md(state["source_health"]), ""] if state.get("source_health") else []),
         "## Papers analyzed",
         "",
     ]
@@ -48,6 +57,7 @@ def render_report(state: dict) -> str:
             f"**Confidence: {gap['confidence_level']}** (score: {gap['confidence_score']}/100) · "
             f"verifier read {len(gap.get('evidence_read_ids', []))}/{len(gap.get('supporting_paper_ids', []))} "
             f"cited sources via tools · verdict: {gap.get('verifier_decision_reason', '')}",
+            *([f"*Capped below High:* {'; '.join(gap['confidence_caps'])}"] if gap.get("confidence_caps") else []),
             "",
             gap.get("rationale", ""),
             "",

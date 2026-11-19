@@ -95,10 +95,12 @@ class FakeLLM:
         self.break_contract_once = break_contract_once
         self.use_tools = use_tools
         self.calls = []
+        self.prompts = []
 
     # --- plain / JSON calls: patched over llm_client.call ---
     def call(self, prompt, system="", tier="fast", json_mode=False):
         self.calls.append(prompt[:60])
+        self.prompts.append(prompt)
         if "Extract every piece of personal or identifying information" in prompt:
             text = prompt.split("<<<", 1)[1].rsplit(">>>", 1)[0]
             ents = []

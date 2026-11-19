@@ -30,6 +30,7 @@ def offline(monkeypatch, tmp_path):
         monkeypatch.setitem(sources.REGISTRY, name, FakeSource(name))
     monkeypatch.setattr(embeddings, "embed", fake_embed)
     monkeypatch.setattr(embeddings, "embed_for_rag", fake_embed)
+    monkeypatch.setattr(embeddings, "embed_for_ranking", fake_embed)
     import rag_store
     monkeypatch.setattr(CONFIG, "rag_store_dir", str(tmp_path / "rag_store"))
     monkeypatch.setattr(rag_store, "_store", None)
@@ -44,7 +45,10 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(CONFIG, "rag_reuse_extracts", True)
     monkeypatch.setattr(CONFIG, "rag_embedding", "sentence_transformers:BAAI/bge-small-en-v1.5")
     monkeypatch.setattr(CONFIG, "llm_temperature", 0.0)
-    monkeypatch.setattr(CONFIG, "privacy_llm_on_papers", True)
+    monkeypatch.setattr(CONFIG, "privacy_llm_on_papers", "auto")
+    monkeypatch.setattr(CONFIG, "ranking_embedding", "sentence_transformers:BAAI/bge-small-en-v1.5")
+    monkeypatch.setattr(CONFIG, "high_confidence_min_papers", 8)
+    monkeypatch.setattr(CONFIG, "high_confidence_min_sources", 2)
     monkeypatch.setattr(CONFIG, "tracing_enabled", True)
     return fake
 
@@ -280,7 +284,8 @@ def test_trace_outbound_contract_no_pii(traced):
 @pytest.mark.parametrize("facts,seen,expected", [
     ({"cited_papers_relevant": True, "counterexample_found": False, "overstated": False}, set(), True),
     ({"cited_papers_relevant": False, "counterexample_found": False, "overstated": False}, set(), False),
-    ({"cited_papers_relevant": True, "counterexample_found": True, "counterexample_paper_id": "arxiv:1", "overstated": False}, {"arxiv:1"}, False),
+    # a counterexample without a verbatim sentence from that paper is ignored (live-run bug)
+    ({"cited_papers_relevant": True, "counterexample_found": True, "counterexample_paper_id": "arxiv:1", "overstated": False}, {"arxiv:1"}, True),
     ({"cited_papers_relevant": True, "counterexample_found": True, "counterexample_paper_id": "arxiv:404", "overstated": False}, {"arxiv:1"}, True),
     ({"cited_papers_relevant": True, "counterexample_found": False, "overstated": True}, set(), False),
 ])
@@ -394,3 +399,215 @@ def test_real_mistakes_are_still_rejected(offline):
     assert e4.get("unknown_id") and not e4["ok"]
     _, e5 = _verifier_ctx().execute("get_paper_text", {"paper_id": "not-an-id"})          # malformed id
     assert e5.get("contract_error")
+
+
+# ---------------------------------------------------------------------------
+# Quality fixes from the live app run (2026-11-19)
+# ---------------------------------------------------------------------------
+class _Resp:
+    def __init__(self, status, headers=None, text=""):
+        self.status_code, self.headers, self.text = status, headers or {}, text
+
+    def json(self):
+        return {"data": []}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import httpx
+            raise httpx.HTTPStatusError(str(self.status_code), request=None, response=self)
+
+
+@pytest.fixture
+def net_env(monkeypatch):
+    from sources import net
+    net.reset_run()
+    monkeypatch.setattr(net, "_last_call", {})
+    sleeps = []
+    monkeypatch.setattr(net.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(CONFIG, "source_max_retries", 2)
+    monkeypatch.setattr(CONFIG, "source_retry_max_wait", 10.0)
+    monkeypatch.setattr(CONFIG, "source_disable_after_failures", 2)
+    yield net, sleeps
+    net.reset_run()
+
+
+def test_429_is_retried_honouring_retry_after(net_env, monkeypatch):
+    net, sleeps = net_env
+    replies = iter([_Resp(429, {"Retry-After": "3"}), _Resp(200)])
+    monkeypatch.setattr(net.httpx, "get", lambda *a, **k: next(replies))
+    assert net.get("openalex", "https://x").status_code == 200
+    assert 3.0 in sleeps
+    h = net.source_health()["openalex"]
+    assert h["ok"] == 1 and h["retries"] == 1 and not h["disabled"]
+
+
+def test_source_that_keeps_failing_is_switched_off_and_reported(net_env, monkeypatch):
+    net, _ = net_env
+    calls = []
+    monkeypatch.setattr(net.httpx, "get", lambda *a, **k: calls.append(1) or _Resp(429))
+    monkeypatch.setattr(CONFIG, "semantic_scholar_api_key", "")
+    for _ in range(2):
+        net.get("semantic_scholar", "https://x")
+    h = net.source_health()["semantic_scholar"]
+    assert h["disabled"] and "SEMANTIC_SCHOLAR_API_KEY" in h["last_error"]
+    n = len(calls)
+    with pytest.raises(net.SourceUnavailable):
+        net.get("semantic_scholar", "https://x")
+    assert len(calls) == n                       # no more network calls this run
+    assert net.answered_sources() == []
+
+
+def test_example_values_from_env_example_are_not_sent(monkeypatch):
+    import config
+    for v in ("you@example.com    # OpenAlex polite pool", "your-key-here", "", "none"):
+        monkeypatch.setenv("X_TEST", v)
+        assert config._secret("X_TEST") == ""
+    monkeypatch.setenv("X_TEST", "real-key-123   # comment")
+    assert config._secret("X_TEST") == "real-key-123"
+
+
+def test_arxiv_query_requires_every_topic_word_and_filters_years_server_side():
+    from sources import arxiv
+    q = arxiv.build_query("automatic short answer grading using large language models", 2020, 2026)
+    assert "all:grading AND" in q and " OR " not in q and "using" not in q
+    assert "submittedDate:[202001010000 TO 202612312359]" in q
+    assert arxiv.build_query("few-shot NER", None, None) == '(all:"few shot" AND all:ner)'
+    relaxed = arxiv.build_query("automatic short answer grading using large language models", strict=False)
+    assert "language" not in relaxed and "all:grading" in relaxed
+
+
+def test_arxiv_relaxes_query_only_when_strict_finds_too_little(monkeypatch):
+    from sources import arxiv
+    seen = []
+
+    def fake_fetch(search_query, limit):
+        seen.append(search_query)
+        return [{"id": f"arxiv:{len(seen)}.{i}", "year": 2024} for i in range(2 if len(seen) == 1 else 6)]
+    monkeypatch.setattr(arxiv, "_fetch", fake_fetch)
+    out = arxiv.search_papers("automatic short answer grading using large language models", 2020, 2026)
+    assert len(seen) == 2 and len(out) == 8
+
+
+def test_ranking_uses_the_ranking_model_with_query_and_document_formats(monkeypatch):
+    kinds, n_docs = [], []
+
+    def spy(texts, kind="document"):
+        kinds.append(kind)
+        n_docs.append(len(texts))
+        return fake_embed(texts, kind)
+    monkeypatch.setattr(embeddings, "embed_for_ranking", spy)
+    papers = [{"id": "a", "title": "Few-shot NER for Thai", "abstract": "few-shot named entity recognition"},
+              {"id": "b", "title": "Quantum photonics engine", "abstract": ""}]
+    ranked = embeddings.rank_by_similarity("few-shot named entity recognition", papers)
+    assert kinds == ["query", "document"] and ranked[0]["id"] == "a"
+    assert n_docs == [1, 2]          # the title-only paper is embedded and scored too, not zeroed
+
+
+def test_ranking_threshold_is_per_model_and_overridable(monkeypatch):
+    monkeypatch.setattr(CONFIG, "similarity_threshold", None)
+    monkeypatch.setattr(CONFIG, "ranking_embedding", "ollama:embeddinggemma:300m")
+    assert embeddings.ranking_threshold() == embeddings.RANKING_THRESHOLDS["embeddinggemma"]
+    monkeypatch.setattr(CONFIG, "similarity_threshold", 0.3)
+    assert embeddings.ranking_threshold() == 0.3
+
+
+@pytest.mark.parametrize("quote,expected", [
+    ("Grade Guard grades short answers in Spanish and Hindi using the same rubric prompts.", False),   # verbatim
+    ("Grade Guard supports many languages.", True),                                                     # not in text
+    ("Grade Guard", True),                                                                              # too short
+    (None, True),
+])
+def test_counterexample_needs_a_verbatim_sentence_from_that_paper(quote, expected):
+    import nodes
+    shown = {"arxiv:2504.01253v1": ["Intro. Grade Guard grades short answers in Spanish and Hindi using the "
+                                    "same rubric prompts. Results follow."]}
+    facts = {"cited_papers_relevant": True, "counterexample_found": True,
+             "counterexample_paper_id": "arxiv:2504.01253v1", "counterexample_quote": quote, "overstated": False}
+    assert nodes.verifier_decision(facts, shown)[0] is expected
+
+
+def test_verifier_context_records_every_text_it_showed(offline):
+    text, _ = _verifier_ctx().execute("get_paper_text", {"paper_id": "arxiv:0000.00001"})
+    ctx = _verifier_ctx()
+    ctx.execute("get_paper_text", {"paper_id": "arxiv:0000.00001"})
+    assert "few-shot NER" in " ".join(ctx.shown_text["arxiv:0000.00001"])
+
+
+def test_narrow_search_caps_confidence_below_high():
+    import nodes
+    state = {"paper_extracts": [{}] * 5,
+             "source_health": {"arxiv": {"ok": 5}, "semantic_scholar": {"ok": 0, "last_error": "rate limited (429)"},
+                               "openalex": {"ok": 0, "last_error": "rate limited (429)"}}}
+    caps = nodes._confidence_caps(state)
+    assert any("only 5 papers" in c for c in caps) and any("arxiv only" in c for c in caps)
+    state = {"paper_extracts": [{}] * 8, "source_health": {"arxiv": {"ok": 3}, "openalex": {"ok": 2}}}
+    assert nodes._confidence_caps(state) == []
+
+
+def test_full_run_with_few_papers_never_reports_high(offline):
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5)
+    assert state["gap_candidates"]
+    for g in state["gap_candidates"]:
+        assert g["confidence_level"] != "High" and g["confidence_caps"]
+
+
+def test_trend_summary_names_papers_not_ids(offline):
+    import nodes
+    papers = [{"id": "arxiv:2504.01253v1", "title": "Grade Guard: A Smart System for Short Answer Grading", "year": 2025},
+              {"id": "arxiv:2205.15219v3", "title": "Automatic Short Math Answer Grading via In-context Meta-learning",
+               "year": 2022}]
+    labels = nodes.paper_labels(papers)
+    assert labels["arxiv:2504.01253v1"] == "Grade Guard (2025)"
+    assert nodes.replace_ids_with_labels("as arxiv:2504.01253v1 shows", labels) == "as Grade Guard (2025) shows"
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5)
+    ids = [p["id"] for p in state["selected_papers"]]
+    assert not any(pid in state["trend_summary"] for pid in ids)
+    synth = [p for p in offline.prompts if "Write a short synthesis" in p]
+    table = synth[0].split("Here is a structured comparison table", 1)[1].split("Write a short synthesis", 1)[0]
+    assert not any(pid in table for pid in ids)
+    assert "Quote verified" not in table
+
+
+HEADER = ("# Automatic Grading of Short Answers with LLMs\n\n"
+          "**Ann Example**[1] **, Bob Sample**[2]\n\n"
+          "1Department of Computer Science, Example State University\n"
+          "Cambridge, MA 02139, USA\n{ann, bob}@cs.example.edu\n\n**Abstract**\nWe study grading. ") + "Body text. " * 50
+
+
+@pytest.mark.parametrize("authors,mode,llm_expected", [
+    (["Ann Example", "Bob Sample"], "auto", False),     # metadata + affiliation lines cover the header
+    (["Ann Example"], "auto", True),                    # a name the source did not list survives -> LLM
+    ([], "auto", True),                                 # no author list at all -> LLM
+    (["Ann Example", "Bob Sample"], "always", True),
+    ([], "never", False),
+])
+def test_header_llm_only_when_deterministic_detectors_cannot_vouch(monkeypatch, authors, mode, llm_expected):
+    calls = []
+    monkeypatch.setattr(privacy, "llm_detect", lambda text, ch: calls.append(1) or [])
+    monkeypatch.setattr(CONFIG, "privacy_llm_on_papers", mode)
+    privacy.reset_run()
+    privacy.register_authors(authors)
+    out, _ = privacy.scrub_full_text(HEADER, "arxiv:1", has_author_metadata=bool(authors),
+                                     title="Automatic Grading of Short Answers with LLMs")
+    assert bool(calls) is llm_expected
+    assert "Example State University" not in out and "Cambridge, MA" not in out and "@cs.example.edu" not in out
+    assert "Automatic Grading of Short Answers with LLMs" in out          # the title is not redacted
+    privacy.reset_run()
+
+
+def test_breaker_trips_on_consecutive_failures_even_after_a_success(net_env, monkeypatch):
+    net, _ = net_env
+    replies = iter([_Resp(200)] + [_Resp(429)] * 20)
+    monkeypatch.setattr(net.httpx, "get", lambda *a, **k: next(replies))
+    net.get("semantic_scholar", "https://x")                 # answered once
+    for _ in range(2):
+        net.get("semantic_scholar", "https://x")             # then 2 failed calls in a row
+    assert net.source_health()["semantic_scholar"]["disabled"]
+    assert net.answered_sources() == ["semantic_scholar"]    # still counted as having answered
+
+
+def test_title_only_papers_get_slack_at_the_cut_off():
+    ranked = [{"id": "a", "abstract": "x", "similarity_score": 0.48},
+              {"id": "b", "abstract": "", "similarity_score": 0.48},
+              {"id": "c", "abstract": "", "similarity_score": 0.40}]
+    assert [p["id"] for p in embeddings.filter_by_threshold(ranked, 0.50)] == ["b"]

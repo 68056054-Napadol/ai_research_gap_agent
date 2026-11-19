@@ -4,13 +4,15 @@ Free, CC0-licensed, no key strictly required, but supplying `mailto` puts you in
 pool" with much better reliability. ~240M works; good broad-coverage fallback/cross-check
 against Semantic Scholar, and includes open-access status directly.
 """
-import httpx
 from config import CONFIG
+from . import net
 
 BASE = "https://api.openalex.org/works"
 
 
 def _params(extra: dict) -> dict:
+    # Since Feb 2026 OpenAlex wants an api_key on every call (free); mailto is ignored by the API
+    # but harmless, so a real address is still sent. Placeholders are dropped in config._secret.
     p = dict(extra)
     if CONFIG.openalex_mailto:
         p["mailto"] = CONFIG.openalex_mailto
@@ -53,18 +55,18 @@ def search_papers(query: str, year_from=None, year_to=None, limit: int = 30) -> 
         filters.append(f"from_publication_date:{year_from}-01-01")
     if year_to:
         filters.append(f"to_publication_date:{year_to}-12-31")
-    resp = httpx.get(BASE, params=_params({
+    resp = net.get("openalex", BASE, params=_params({
         "search": query,
         "filter": ",".join(filters[1:]) if len(filters) > 1 else None,
         "per_page": min(limit, 100),
-    }), timeout=30)
+    }))
     resp.raise_for_status()
     return [_to_paper(r) for r in resp.json().get("results", [])]
 
 
 def get_paper(paper_id: str) -> dict | None:
     raw_id = paper_id.split(":", 1)[-1]
-    resp = httpx.get(f"{BASE}/{raw_id}", params=_params({}), timeout=30)
+    resp = net.get("openalex", f"{BASE}/{raw_id}", params=_params({}))
     if resp.status_code == 404:
         return None
     resp.raise_for_status()

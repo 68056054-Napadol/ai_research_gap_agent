@@ -3,8 +3,8 @@ Semantic Scholar Graph API — https://api.semanticscholar.org/api-docs/graph
 No key required for light use; SEMANTIC_SCHOLAR_API_KEY (if set) raises the rate limit.
 Best all-around source: abstracts, citation counts, and an AI-generated TLDR field.
 """
-import httpx
 from config import CONFIG
+from . import net
 
 BASE = "https://api.semanticscholar.org/graph/v1"
 FIELDS = "title,abstract,year,authors,externalIds,citationCount,openAccessPdf,tldr"
@@ -37,14 +37,14 @@ def search_papers(query: str, year_from=None, year_to=None, limit: int = 30) -> 
     params = {"query": query, "fields": FIELDS, "limit": min(limit, 100)}
     if year_from or year_to:
         params["year"] = f"{year_from or ''}-{year_to or ''}"
-    resp = httpx.get(f"{BASE}/paper/search", params=params, headers=_headers(), timeout=30)
+    resp = net.get("semantic_scholar", f"{BASE}/paper/search", params=params, headers=_headers())
     resp.raise_for_status()
     return [_to_paper(r) for r in resp.json().get("data", [])]
 
 
 def get_paper(paper_id: str) -> dict | None:
     raw_id = paper_id.split(":", 1)[-1]
-    resp = httpx.get(f"{BASE}/paper/{raw_id}", params={"fields": FIELDS}, headers=_headers(), timeout=30)
+    resp = net.get("semantic_scholar", f"{BASE}/paper/{raw_id}", params={"fields": FIELDS}, headers=_headers())
     if resp.status_code == 404:
         return None
     resp.raise_for_status()

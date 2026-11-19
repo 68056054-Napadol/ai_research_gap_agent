@@ -31,6 +31,7 @@ def enable_offline_fakes() -> None:
         sources.REGISTRY[n] = FakeSource(n)
     embeddings.embed = fake_embed
     embeddings.embed_for_rag = fake_embed
+    embeddings.embed_for_ranking = fake_embed
     CONFIG.fetch_full_text = False
     CONFIG.similarity_threshold = 0.1
     CONFIG.min_papers_before_retry = 3

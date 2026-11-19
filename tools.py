@@ -69,6 +69,19 @@ VERIFIER_TOOLS = [GET_PAPER_TEXT_SPEC, SEARCH_PAPER_CHUNKS_SPEC, SEARCH_CORPUS_S
 VERIFIER_TOOLS_NO_RAG = [GET_PAPER_TEXT_SPEC]
 
 
+def _source_error(e: Exception) -> str:
+    """Short reason the LLM (and the UI) can act on - 'rate limited', not just 'HTTPStatusError'."""
+    from sources import net
+    if isinstance(e, net.SourceUnavailable):
+        return str(e)
+    resp = getattr(e, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) == 429:
+        return "rate limited (429)"
+    if resp is not None:
+        return f"HTTP {resp.status_code}"
+    return type(e).__name__
+
+
 def _err(msg: str, **extra) -> tuple:
     return json.dumps({"error": msg}, ensure_ascii=False), {"ok": False, "error": msg, **extra}
 
@@ -181,7 +194,7 @@ class SearchToolContext:
             try:
                 found += REGISTRY[src].search_papers(query, year_from=year_from, year_to=year_to, limit=args.limit)
             except Exception as e:  # graceful degradation: one source down != tool failure
-                failures.append(f"{src}: {type(e).__name__}")
+                failures.append(f"{src}: {_source_error(e)}")
                 logger.warning("    [%s] FAILED for query %r: %s", src, query, e)
         found = _dedupe(found)
         for p in found:
@@ -220,6 +233,13 @@ class VerifierToolContext:
         self.store = store
         self.read_ids: set = set()          # cited papers whose own text the verifier looked at
         self.corpus_searches: list = []
+        # every piece of source text the verifier was shown, per paper - a counterexample only
+        # counts if its quote is found in here (nodes.verifier_decision)
+        self.shown_text: dict = {}
+
+    def _shown(self, paper_id: str, text: str) -> None:
+        if text:
+            self.shown_text.setdefault(paper_id, []).append(text)
 
     def execute(self, name: str, arguments: dict) -> tuple:
         if name == "get_paper_text":
@@ -247,12 +267,14 @@ class VerifierToolContext:
         else:
             kind, text = "abstract", (paper.get("abstract") or "")[:max_chars]
         self.read_ids.add(args.paper_id)
+        self._shown(args.paper_id, text)
         ctx = {"paper_id": args.paper_id, "title": paper.get("title"), "year": paper.get("year"),
                "text_kind": kind, "text": text, **({"harness_notes": notes} if notes else {})}
         return json.dumps(ctx, ensure_ascii=False), {"ok": True, "n_items": 1, "text_kind": kind, "policy_notes": notes}
 
-    @staticmethod
-    def _passages(hits: list, max_chars: int = 900) -> list:
+    def _passages(self, hits: list, max_chars: int = 900) -> list:
+        for h in hits:
+            self._shown(h["paper_id"], h["text"][:max_chars])
         return [{"paper_id": h["paper_id"], "title": h["title"], "year": h["year"], "section": h["section"],
                  "score": h["score"], "text": h["text"][:max_chars]} for h in hits]
 

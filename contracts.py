@@ -74,6 +74,9 @@ class VerifierOutput(BaseModel):
     cited_papers_relevant: bool       # cited papers really concern the claim's topic AND its qualifiers
     counterexample_found: bool        # a retrieved passage shows a paper already doing what the claim says is missing
     counterexample_paper_id: Optional[str] = None
+    # the sentence from that paper's passage that shows it already does the thing - must be copied
+    # verbatim; the harness checks it against the text the tools returned for that paper
+    counterexample_quote: Optional[str] = None
     overstated: bool                  # claim goes further than the source text allows
     notes: str
     unsupported_aspects: str = "none"

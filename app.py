@@ -30,6 +30,7 @@ import time
 
 import streamlit as st
 
+import embeddings
 import links
 import metrics
 import outbound
@@ -74,6 +75,19 @@ NEXT_NODE = {
     "compare_papers": "analyze_gaps",
     "analyze_gaps": "privacy_guard",
 }
+def source_health_line(health: dict) -> str:
+    """'Sources: arxiv ✅ 5 · semantic_scholar ⛔ rate limited ...' for the search card and report."""
+    if not health:
+        return ""
+    parts = []
+    for src, h in sorted(health.items()):
+        if h.get("ok"):
+            parts.append(f"{src} ✅" + (f" ({h['retries']} retried)" if h.get("retries") else ""))
+        else:
+            parts.append(f"{src} ⛔ {h.get('last_error') or 'no answer'}")
+    return "Sources: " + " · ".join(parts)
+
+
 RETRY_RESET_KEYS = ["generate_keywords", "search_sources", "filter_and_rank", "check_sufficiency"]
 
 # logging_utils.LOG_FORMAT is "HH:MM:SS  LEVEL   name             message" (no separator before
@@ -149,11 +163,13 @@ def _summarize_output(node_key: str, update: dict, acc: dict) -> str:
         calls = [t for t in (update.get("tool_trace") or []) if t.get("tool_name") == "search_papers"]
         fb = " ⚠️ model made no tool calls — harness fallback used" if update.get("search_used_fallback") else ""
         return (f"**{len(calls)}** search_papers call(s) chosen by the LLM → **{n}** unique candidate papers{fb}  \n"
-                f"Agent summary: _{(update.get('search_summary') or '')[:300]}_")
+                + source_health_line(update.get("source_health") or {}) +
+                f"  \nAgent summary: _{(update.get('search_summary') or '')[:300]}_")
     if node_key == "filter_and_rank":
         sel = update.get("selected_papers") or []
         ranked = update.get("ranked_papers") or []
-        return f"**{len(ranked)}** passed the similarity threshold — top **{len(sel)}** selected for deep analysis"
+        return (f"**{len(ranked)}** passed the relevance cut-off ({embeddings.ranking_threshold():.2f}, "
+                f"`{CONFIG.ranking_embedding}`) — top **{len(sel)}** selected for deep analysis")
     if node_key == "check_sufficiency":
         if update.get("sufficient"):
             return "Sufficient papers found — proceeding to extraction"
@@ -289,8 +305,9 @@ with st.sidebar:
 
     st.divider()
     CONFIG.max_deep_analysis_papers = st.slider(
-        "Papers to deep-analyze", min_value=5, max_value=40, value=CONFIG.max_deep_analysis_papers,
-        help="Higher = more thorough but slower and more expensive (architecture doc §7.4).",
+        "Papers to deep-analyze", min_value=3, max_value=40, value=min(CONFIG.max_deep_analysis_papers, 40),
+        help="Each paper adds roughly 45 s on a local 14B model (PDF + extraction + indexing). "
+             f"Gaps can only reach High confidence with >= {CONFIG.high_confidence_min_papers} papers.",
     )
     source_options = ["semantic_scholar", "arxiv", "openalex"]
     selected_sources = st.multiselect("Data sources", source_options, default=list(CONFIG.enabled_sources))
@@ -309,11 +326,20 @@ with st.sidebar:
 st.title("AI Research Assistant Agent")
 st.caption("Find, compare, and identify research gaps across academic papers.")
 
-topic = st.text_input("Research topic", placeholder="e.g. few-shot named entity recognition in low-resource languages")
-c1, c2, c3 = st.columns([1, 1, 2])
-year_from = c1.number_input("Year from", min_value=1990, max_value=2030, value=2020, step=1)
-year_to = c2.number_input("Year to", min_value=1990, max_value=2030, value=2026, step=1)
-run_clicked = c3.button("Run agent", type="primary", use_container_width=True)
+# A form: typing the topic and clicking Run once is enough. (With a bare text_input + button, the
+# first click only committed the text box and a second click was needed to start the run.)
+with st.form("run_form", border=False):
+    topic = st.text_input("Research topic", placeholder="e.g. few-shot named entity recognition in low-resource languages")
+    c1, c2, c3 = st.columns([1, 1, 2])
+    year_from = c1.number_input("Year from", min_value=1990, max_value=2030, value=2020, step=1)
+    year_to = c2.number_input("Year to", min_value=1990, max_value=2030, value=2026, step=1)
+    c3.markdown("<div style='height: 1.75rem'></div>", unsafe_allow_html=True)
+    run_clicked = c3.form_submit_button("Run agent", type="primary", use_container_width=True)
+missing_keys = [name for name, key in (("SEMANTIC_SCHOLAR_API_KEY", CONFIG.semantic_scholar_api_key),
+                                       ("OPENALEX_API_KEY", CONFIG.openalex_api_key)) if not key]
+if missing_keys:
+    st.caption("⚠️ No " + " / ".join(missing_keys) + " in .env - those sources may be rate limited, which narrows "
+               "the search (and caps gap confidence below High). Both keys are free; see .env.example.")
 
 # ---------------------------------------------------------------------------
 # Run in a background thread + live per-node step cards.
@@ -575,6 +601,8 @@ elif state:
             st.markdown(f":{color}[**{gap['confidence_level']} confidence** — {gap['confidence_score']}/100] · "
                         f"verifier read **{len(gap.get('evidence_read_ids', []))}/{len(gap.get('supporting_paper_ids', []))}** "
                         f"cited sources via tool")
+            if gap.get("confidence_caps"):
+                st.caption("Capped below High: " + "; ".join(gap["confidence_caps"]))
             st.write(gap.get("rationale", ""))
             st.markdown("**Supporting papers** (links built from paper metadata, not written by the AI):  \n"
                         + "  \n".join(f"• {links.markdown_link(sp)}" for sp in gap.get("supporting_papers", [])))
@@ -583,6 +611,9 @@ elif state:
                 f = gap.get("verifier_facts") or {}
                 st.caption(f"Verdict rule: {gap['verifier_decision_reason']} · facts: relevant={f.get('cited_papers_relevant')}, "
                            f"counterexample={f.get('counterexample_found')}, overstated={f.get('overstated')}")
+                if f.get("counterexample_quote"):
+                    st.caption(f"Counterexample quote ({'verified in its text' if f.get('counterexample_verified') else 'not found in its text - ignored'}): "
+                               f"“{f['counterexample_quote'][:300]}”")
             if gap.get("counterexample_searches"):
                 st.caption("🔎 Counterexample searches across the corpus (search_corpus): "
                            + "; ".join(f"“{q}”" for q in gap["counterexample_searches"]))
