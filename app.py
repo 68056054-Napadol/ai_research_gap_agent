@@ -38,7 +38,7 @@ import tracing
 from config import CONFIG
 from graph import build_graph
 from logging_utils import QueueLogHandler, quiet_noisy_third_party_loggers
-from main import render_report
+from main import render_report, run_info
 
 st.set_page_config(page_title="AI Research Assistant Agent", layout="wide")
 
@@ -265,6 +265,13 @@ def _render_card(placeholder, node_key: str, card: dict):
             st.error(card["error"])
 
 
+# Two pages: the agent run (everything below) and the Dashboard over all saved runs.
+page = st.sidebar.radio("Page", ["🔬 Run agent", "📊 Dashboard"], horizontal=True, key="page")
+if page == "📊 Dashboard":
+    import dashboard_page
+    dashboard_page.render()
+    st.stop()
+
 if "final_state" not in st.session_state:
     st.session_state.final_state = None
 if "log_lines" not in st.session_state:
@@ -361,6 +368,7 @@ if run_clicked:
         st.error("Enter an Anthropic API key in the sidebar, or switch to the local backend.")
     else:
         metrics.reset()
+        run_started = time.time()
         agent_graph = build_graph()
         initial_state = {
             "research_topic": topic,
@@ -537,6 +545,7 @@ if run_clicked:
         else:
             final_state = run_result["state"]
             final_state.setdefault("run_metrics", metrics.snapshot())
+            final_state["run_info"] = run_info(run_started, CONFIG.max_deep_analysis_papers, "streamlit")
             st.session_state.final_state = final_state
 
             os.makedirs(CONFIG.output_dir, exist_ok=True)

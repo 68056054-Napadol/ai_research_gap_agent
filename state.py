@@ -100,6 +100,7 @@ class AgentState(TypedDict, total=False):
     tool_trace: list            # every tool call: agent, tool_name, arguments, returned context
     privacy_log: list           # every decision-model decision (masked, never the original text)
     run_metrics: dict           # metrics.snapshot() at the end of the run
+    run_info: dict              # main.run_info: started_at, seconds, models, sources (for the Dashboard)
 
     # --- final ---
     report_markdown: str

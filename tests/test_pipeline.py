@@ -623,3 +623,115 @@ def test_same_paper_from_two_sources_is_kept_once():
     out = sources._dedupe([a, b])
     assert [p["id"] for p in out] == ["arxiv:1"]
     assert out[0]["abstract"] == "We study AES." and out[0]["doi"] == "10.1000/xyz" and out[0]["citation_count"] == 7
+
+
+@pytest.mark.parametrize("a_authors,b_authors,a_year,b_year,expected", [
+    (["Wei Wang", "Ann Example"], ["Wang Wei", "A. Example"], 2025, 2025, True),    # order + initials
+    (["Wei Wang", "Ann Example"], ["Bob Other", "Cara Third"], 2025, 2025, False),  # same title, other people
+    ([], ["Bob Other"], 2025, 2025, True),                                          # no list: same year -> same
+    ([], ["Bob Other"], 2019, 2025, False),                                         # no list: years far apart
+])
+def test_same_title_needs_matching_authors(a_authors, b_authors, a_year, b_year, expected):
+    a = {"id": "arxiv:1", "title": "LCES: Zero-shot Automated Essay Scoring", "doi": None,
+         "authors": a_authors, "year": a_year}
+    b = {"id": "openalex:W2", "title": "LCES: zero-shot automated essay scoring.", "doi": "10.1/x",
+         "authors": b_authors, "year": b_year}
+    assert (len(sources._dedupe([a, b])) == 1) is expected
+
+
+def test_author_fingerprint_survives_privacy_scrub_and_still_dedupes():
+    a = {"id": "arxiv:1", "title": "Same Title Here", "doi": None, "authors": ["Wei Wang", "Ann Example"], "year": 2025}
+    b = {"id": "openalex:W2", "title": "Same title here", "doi": "10.1/x", "authors": ["Wang Wei"], "year": 2025}
+    c = {"id": "openalex:W3", "title": "Same title here", "doi": "10.1/y", "authors": ["Zed Nobody"], "year": 2025}
+    privacy.reset_run()
+    for p in (a, b, c):
+        privacy.scrub_paper(p)
+        assert "authors" not in p and p["author_keys"]
+        assert not any("wang" in k.lower() for k in p["author_keys"])          # hashes, not names
+    out = sources._dedupe([a, b, c])
+    assert [p["id"] for p in out] == ["arxiv:1", "openalex:W3"]
+    privacy.reset_run()
+
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+def _saved_state(tmp_path, name, topic, gaps, papers=None):
+    st = {"research_topic": topic, "gap_candidates": gaps, "selected_papers": papers or [], "paper_extracts": [{}] * 8,
+          "source_health": {"arxiv": {"ok": 2}, "openalex": {"ok": 1}, "semantic_scholar": {"ok": 0}},
+          "run_info": {"started_at": name, "seconds": 300, "model_strong": "qwen3:14b"}}
+    (tmp_path / f"{name}_state.json").write_text(json.dumps(st), encoding="utf-8")
+
+
+def _gap(claim, supported=True, category=None, ce=None, verified=None, quote=None):
+    g = {"claim": claim, "supporting_paper_ids": ["arxiv:1", "arxiv:2"], "confidence_level": "High" if supported else "Medium",
+         "confidence_score": 75 if supported else 50, "verifier_supported": supported,
+         "verifier_facts": {"counterexample_found": bool(ce), "counterexample_paper_id": ce, "counterexample_quote": quote},
+         "supporting_papers": [{"id": "arxiv:1", "title": "P1", "year": 2024, "url": "https://arxiv.org/abs/1"}]}
+    if verified is not None:
+        g["verifier_facts"]["counterexample_verified"] = verified
+    if category:
+        g["category"] = category
+    return g
+
+
+def test_dashboard_statuses_categories_and_refuting_paper(tmp_path):
+    import dashboard
+    papers = [{"id": "openalex:W9", "title": "Grade Guard", "year": 2025, "doi": "10.1/gg"}]
+    _saved_state(tmp_path, "20261119_100000", "short answer grading", [
+        _gap("Non-English short answer grading is under-explored", category="Language & population"),
+        _gap("Human feedback loops are missing in LLM grading", supported=False, ce="openalex:W9", verified=True,
+             quote="a model evaluation mechanism composed of human verifiers"),
+        _gap("Old-format gap refuted without a quote", supported=False, ce="openalex:W9"),       # pre-quote run
+        _gap("Claims more than the sources say about datasets", supported=False, verified=False),
+    ], papers)
+    rows = dashboard.gap_rows(dashboard.load_runs(str(tmp_path)))
+    by = {r["claim"][:20]: r for r in rows}
+    assert by["Non-English short an"]["category_source"] == "llm"
+    assert by["Human feedback loops"]["status"] == dashboard.STATUS_REFUTED
+    ref = by["Human feedback loops"]["counterexample_paper"]
+    assert ref["title"] == "Grade Guard" and ref["url"] == "https://doi.org/10.1/gg"
+    assert by["Human feedback loops"]["counterexample_quote"].startswith("a model evaluation")
+    assert by["Old-format gap refut"]["status"] == dashboard.STATUS_REFUTED_OLD
+    assert by["Claims more than the"]["status"] == dashboard.STATUS_NOT_SUPPORTED
+    assert by["Old-format gap refut"]["category_source"] == "rules"
+    assert dashboard.summary(rows, dashboard.load_runs(str(tmp_path)))["refuted"] == 2
+
+
+def test_dashboard_flags_gaps_that_recur_across_topics(tmp_path):
+    import dashboard
+    _saved_state(tmp_path, "20261119_100000", "essay scoring", [_gap("Lack of research on essay scoring in non-English languages", category="Language & population")])
+    _saved_state(tmp_path, "20261119_110000", "short answer grading", [_gap("Lack of research on short answer grading in non-English languages", category="Language & population")])
+    _saved_state(tmp_path, "20261119_120000", "rag hallucination", [_gap("Combining retrieval graphs with entity verification is unexplored", category="Method combination")])
+    rec = dashboard.recurring_gaps(dashboard.gap_rows(dashboard.load_runs(str(tmp_path))))
+    assert len(rec) == 1 and rec[0]["n_topics"] == 2 and rec[0]["category"] == "Language & population"
+
+
+def test_dashboard_page_renders(tmp_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    _saved_state(tmp_path, "20261119_100000", "short answer grading", [
+        _gap("Non-English short answer grading is under-explored", category="Language & population"),
+        _gap("Human feedback loops are missing", supported=False, ce="arxiv:1", verified=True, quote="x" * 40)])
+    monkeypatch.setattr(CONFIG, "output_dir", str(tmp_path))
+
+    def page():
+        import dashboard_page
+        dashboard_page.render()
+    at = AppTest.from_function(page).run(timeout=60)
+    assert not at.exception
+    assert any("Gaps refuted by a paper (1)" in h.value for h in at.subheader)
+    assert [m.value for m in at.metric][:4] == ["1", "1", "8", "2"]
+
+
+def test_gap_category_is_normalised_not_rejected():
+    from contracts import GapItem
+    assert GapItem(claim="x" * 20, supporting_paper_ids=[], rationale="r", category="language").category == "Language & population"
+    assert GapItem(claim="x" * 20, supporting_paper_ids=[], rationale="r", category="whatever").category == "Other"
+    assert GapItem(claim="x" * 20, supporting_paper_ids=[], rationale="r").category == "Other"
+
+
+def test_rejected_key_is_reported_as_such(net_env, monkeypatch):
+    net, _ = net_env
+    monkeypatch.setattr(net.httpx, "get", lambda *a, **k: _Resp(403))
+    net.get("semantic_scholar", "https://x")
+    assert "SEMANTIC_SCHOLAR_API_KEY" in net.source_health()["semantic_scholar"]["last_error"]

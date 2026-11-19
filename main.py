@@ -92,10 +92,29 @@ def render_report(state: dict) -> str:
     return "\n".join(lines)
 
 
+def run_info(started: float, max_papers: int, entrypoint: str) -> dict:
+    """What the Dashboard needs to compare runs: when, how long, with which models and sources."""
+    import time
+    local = CONFIG.llm_backend == "local"
+    return {
+        "started_at": datetime.datetime.fromtimestamp(started).isoformat(timespec="seconds"),
+        "seconds": round(time.time() - started, 1),
+        "entrypoint": entrypoint,
+        "backend": CONFIG.llm_backend,
+        "model_fast": CONFIG.local_model_fast if local else CONFIG.cloud_model_fast,
+        "model_strong": CONFIG.local_model_strong if local else CONFIG.cloud_model_strong,
+        "max_papers": max_papers,
+        "enabled_sources": list(CONFIG.enabled_sources),
+        "ranking_embedding": CONFIG.ranking_embedding,
+    }
+
+
 def run(topic: str, year_from=None, year_to=None, max_papers=None, session_id: str = None,
         entrypoint: str = "cli", tags=None) -> dict:
     """Run the whole graph once and return the final state (used by main() and the evaluation
     scripts in evaluation/)."""
+    import time
+    started = time.time()
     metrics.reset()
     app = build_graph()
     initial_state = {
@@ -110,6 +129,7 @@ def run(topic: str, year_from=None, year_to=None, max_papers=None, session_id: s
     with tracing.run_trace(entrypoint, session_id=session_id, extra_tags=tags) as trace:
         final_state = app.invoke(initial_state, {"recursion_limit": 60})
         final_state.setdefault("run_metrics", metrics.snapshot())
+        final_state["run_info"] = run_info(started, initial_state["max_papers"], entrypoint)
         trace.finish(final_state)
     if trace.trace_id:
         final_state["trace_id"] = trace.trace_id

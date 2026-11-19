@@ -712,6 +712,29 @@ problems. What changed, and what was measured:
 5. **UI.** One click runs (form), default 8 papers, and the trend summary names papers by short
    title (`Grade Guard (2025)`) instead of ids or the internal "Quote verified" flag.
 
+## Dashboard
+
+Sidebar → **Page: 📊 Dashboard** reads every saved run in `output/` (`dashboard.py` for the data,
+`dashboard_page.py` for the page) and shows:
+
+- **KPIs** — runs, topics, papers analysed, gaps, supported / refuted, High-confidence count, mean score.
+- **Gaps by category** and **confidence by verdict** charts. The gap proposer now gives every gap one
+  of 8 categories (`contracts.GAP_CATEGORIES`); runs saved before that get one from keyword rules
+  (marked "inferred").
+- **All gaps** table with filters (topic, category, verdict, confidence) and a CSV download.
+- **Gaps refuted by a paper** — the refuting paper with its link (built from metadata) and the
+  verbatim sentence the verifier quoted from it.
+- **Gaps that recur across different topics** — near-identical gaps proposed for unrelated topics
+  (topic words removed before comparing), usually a stock answer such as "non-English settings are
+  under-explored" rather than something these papers motivate.
+- **Runs** — duration, model, candidates vs analysed papers, which sources answered / failed,
+  tokens, privacy redactions, Langfuse trace link.
+- **Papers** — analysed papers by year and by source, and the papers cited most by gaps.
+
+Duplicate papers: the same title is only treated as the same paper when the authors match too
+(order-free, initials ignored), or — when one side has no author list — when the years agree. The
+author comparison uses one-way hashes (`sources.author_keys`) kept after the names are dropped.
+
 ## What to build next
 
 Team split — see architecture doc §6.

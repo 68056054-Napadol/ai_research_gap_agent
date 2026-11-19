@@ -125,6 +125,10 @@ def get(source: str, url: str, params: dict | None = None, headers: dict | None 
             with _lock:
                 _h(source)["ok"] += 1
                 _h(source)["consecutive_failures"] = 0
+        elif resp.status_code in (401, 403):
+            key = {"semantic_scholar": "SEMANTIC_SCHOLAR_API_KEY", "openalex": "OPENALEX_API_KEY"}.get(source)
+            _record_failure(source, f"key rejected (HTTP {resp.status_code})"
+                            + (f" - check {key} in .env" if key else ""))
         else:
             _record_failure(source, f"HTTP {resp.status_code}")
         return resp

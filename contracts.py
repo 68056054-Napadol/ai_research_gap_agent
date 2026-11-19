@@ -57,10 +57,42 @@ class PaperExtractOutput(BaseModel):
         return v.strip()
 
 
+# What kind of gap it is - used by the Dashboard to group gaps across runs. The model picks one;
+# anything else it writes is mapped to the closest label (or "Other") instead of failing the call.
+GAP_CATEGORIES = (
+    "Language & population",            # languages, regions, age groups, education levels
+    "Data & benchmarks",                # missing datasets, annotation, benchmark coverage
+    "Method combination",               # two approaches never combined / new technique
+    "Evaluation & metrics",             # how results are measured, human vs automatic evaluation
+    "Application domain & setting",     # a field, task or real-world setting not yet covered
+    "Efficiency & deployment",          # cost, small models, latency, real-time, on-device
+    "Reliability, fairness & explainability",  # bias, robustness, transparency, safety
+    "Other",
+)
+
+
+def normalize_category(value) -> str:
+    v = str(value or "").strip().lower()
+    for c in GAP_CATEGORIES:
+        if v == c.lower():
+            return c
+    for c in GAP_CATEGORIES:                 # "language", "data", "fairness" ...
+        words = [w.strip("&,") for w in c.lower().split() if len(w) > 3]
+        if any(w in v for w in words):
+            return c
+    return "Other"
+
+
 class GapItem(BaseModel):
     claim: str = Field(min_length=10)
     supporting_paper_ids: list[str]
     rationale: str
+    category: str = "Other"
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def _category(cls, v):
+        return normalize_category(v)
 
 
 class GapProposalOutput(BaseModel):

@@ -75,10 +75,15 @@ combined with a method, a limitation multiple papers share, an unexplored popula
 Every gap MUST cite at least 2 supporting paper_ids from the table as evidence for why it's a
 real gap (not just a guess) — a gap with only 0-1 supporting papers should not be proposed.
 
+Give each gap ONE category, exactly one of: "Language & population", "Data & benchmarks",
+"Method combination", "Evaluation & metrics", "Application domain & setting",
+"Efficiency & deployment", "Reliability, fairness & explainability", "Other".
+
 Return ONLY a JSON object, no other text:
 
 {{"gap_candidates": [
-  {{"claim": "...", "supporting_paper_ids": ["id1", "id2"], "rationale": "why this is a gap, referencing the evidence"}}
+  {{"claim": "...", "supporting_paper_ids": ["id1", "id2"], "rationale": "why this is a gap, referencing the evidence",
+    "category": "one of the categories above"}}
 ]}}
 """
 

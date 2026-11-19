@@ -236,6 +236,7 @@ class VerifierToolContext:
         # every piece of source text the verifier was shown, per paper - a counterexample only
         # counts if its quote is found in here (nodes.verifier_decision)
         self.shown_text: dict = {}
+        self.seen_meta: dict = {}          # {paper_id: {title, year}} for every paper a tool returned
 
     def _shown(self, paper_id: str, text: str) -> None:
         if text:
@@ -275,6 +276,7 @@ class VerifierToolContext:
     def _passages(self, hits: list, max_chars: int = 900) -> list:
         for h in hits:
             self._shown(h["paper_id"], h["text"][:max_chars])
+            self.seen_meta.setdefault(h["paper_id"], {"title": h.get("title"), "year": h.get("year")})
         return [{"paper_id": h["paper_id"], "title": h["title"], "year": h["year"], "section": h["section"],
                  "score": h["score"], "text": h["text"][:max_chars]} for h in hits]
 

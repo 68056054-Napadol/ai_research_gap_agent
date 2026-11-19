@@ -488,6 +488,11 @@ def _verify_with_tools(gap: dict, supporting_ids: list, extracts_by_id: dict, se
         and "quote verified" in verdict["decision_reason"]
     if verdict.get("counterexample_found") and not verdict["counterexample_verified"]:
         metrics.inc("verifier_counterexample_rejected")
+    if verdict["counterexample_verified"]:
+        cid = verdict["counterexample_paper_id"]
+        meta = next((p for p in selected_papers if p["id"] == cid), None) or {"id": cid, **ctx.seen_meta.get(cid, {})}
+        verdict["counterexample_paper"] = {"id": cid, "title": meta.get("title") or cid, "year": meta.get("year"),
+                                           "url": meta.get("url") or links.paper_url(meta)}
     verdict["llm_opinion"] = llm_opinion
     if llm_opinion is not None and llm_opinion != verdict["supported"]:
         metrics.inc("verifier_llm_disagreed_with_rule")
@@ -603,6 +608,9 @@ def analyze_gaps(state: AgentState) -> dict:
             "confidence_score": round(confidence_score, 1),
             "confidence_level": confidence_level,
             "confidence_caps": caps,
+            "category": gap.get("category") or "Other",
+            # the paper that refutes the gap, with a link from metadata - only when its quote was verified
+            "counterexample_paper": verdict.get("counterexample_paper"),
             "verifier_supported": bool(verdict.get("supported")),
             "verifier_facts": {k: verdict.get(k) for k in ("cited_papers_relevant", "counterexample_found",
                                                           "counterexample_paper_id", "counterexample_quote",

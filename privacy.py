@@ -295,6 +295,9 @@ def scrub_paper(paper: dict) -> list:
     authors = paper.pop("authors", None) or []
     register_authors(authors)
     paper["n_authors"] = len(authors)
+    if authors and not paper.get("author_keys"):
+        from sources import author_keys
+        paper["author_keys"] = author_keys(authors)   # one-way hashes, for duplicate detection only
     records = []
     for fld in ("title", "abstract"):
         if paper.get(fld):
