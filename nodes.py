@@ -239,7 +239,8 @@ def _rag_view(store, paper: dict, full_text: str) -> str:
                 continue
             seen.add(hit["chunk"])
             parts.append(f"[{hit['section']}]\n{hit['text']}")
-    return "\n\n".join(parts)[:FULL_TEXT_CHAR_LIMIT]
+    # chunks stored by an earlier run were scrubbed with that run's author list only
+    return privacy.scrub_known("\n\n".join(parts)[:FULL_TEXT_CHAR_LIMIT], f"{paper['id']}:rag_view")[0]
 
 
 def _extract_cache_key(prompt: str) -> str:
@@ -261,7 +262,8 @@ def extract_paper_data(state: AgentState) -> dict:
         # Knowledge base first (KM): a paper indexed with full text in an earlier run is reused -
         # no PDF download, no conversion, no re-redaction.
         if full_text is None and store is not None and store.indexed_kind(paper["id"]) == "full_text":
-            full_text = store.paper_text(paper["id"])
+            full_text, recs = privacy.scrub_known(store.paper_text(paper["id"]), f"{paper['id']}:kb_full_text")
+            privacy_records.extend(recs)
             paper["full_text"] = full_text
             metrics.inc("rag_full_text_reused")
             logger.info("  [%d/%d] Full text reused from knowledge base (%d chars): %s", i, total, len(full_text), title)
@@ -572,6 +574,13 @@ def analyze_gaps(state: AgentState) -> dict:
                        "decision_reason": "verifier call failed"}
             read_ids, corpus_searches = [], []
         coverage = len([r for r in read_ids if r in supporting_ids]) / len(supporting_ids)
+        if coverage == 0 and verdict.get("supported"):
+            # live run with thinking on: the verifier made no tool call at all, yet its notes said
+            # "Checked both cited papers ... no counterexample in corpus search". Facts it never
+            # looked up are not facts.
+            metrics.inc("verifier_answered_without_reading")
+            verdict["supported"] = False
+            verdict["decision_reason"] = "verifier did not read any cited paper (its notes claim otherwise) - unverified"
 
         # --- confidence scoring formula (architecture doc §7.3) ---
         # TODO(Member C): first-pass heuristic - calibrate with evaluation/eval_plan.md §4.

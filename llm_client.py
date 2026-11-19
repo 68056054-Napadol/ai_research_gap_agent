@@ -249,7 +249,7 @@ def _call_ollama(prompt: str, system: str, tier: str, json_mode: bool = False) -
     # prompt can't blow up RAM/CPU time on weak hardware (see config.py). The 4096 floor (up from
     # 2048) gives extra headroom even for a short prompt's reply.
     approx_prompt_tokens = (len(prompt) + len(system)) // 4
-    num_ctx = min(max(approx_prompt_tokens + 2048, 4096), CONFIG.ollama_max_ctx)
+    num_ctx = min(max(approx_prompt_tokens + _reply_reserve(model), 4096), CONFIG.ollama_max_ctx)
     payload = {
         "model": model,
         "messages": [
@@ -322,9 +322,16 @@ def _ollama_options(num_ctx: int) -> dict:
     return {"num_ctx": num_ctx, "temperature": CONFIG.llm_temperature, "seed": CONFIG.llm_seed}
 
 
-def _ollama_num_ctx(messages: list, system: str = "") -> int:
+def _reply_reserve(model: str = "") -> int:
+    """Tokens kept free for the reply. With thinking on, the reasoning trace is generated inside
+    the same window before the answer - 2048 would let a long trace push the prompt out."""
+    think = ollama_profile(model)["think"] if model else CONFIG.ollama_think
+    return 2048 + (6144 if think else 0)
+
+
+def _ollama_num_ctx(messages: list, system: str = "", model: str = "") -> int:
     approx = (sum(len(json.dumps(m, ensure_ascii=False)) for m in messages) + len(system)) // 4
-    return min(max(approx + 2048, 4096), CONFIG.ollama_max_ctx)
+    return min(max(approx + _reply_reserve(model), 4096), CONFIG.ollama_max_ctx)
 
 
 
@@ -496,7 +503,7 @@ def _tool_turn_ollama(messages, tool_specs, system, tier, allow_tools):
     model = CONFIG.local_model_strong if tier == "strong" else CONFIG.local_model_fast
     full = [{"role": "system", "content": system or DEFAULT_SYSTEM}] + messages
     payload = {"model": model, "messages": full, "stream": True, "think": ollama_profile(model)["think"],
-               "options": _ollama_options(_ollama_num_ctx(full))}
+               "options": _ollama_options(_ollama_num_ctx(full, model=model))}
     if allow_tools:
         payload["tools"] = [{"type": "function", "function": {
             "name": t["name"], "description": t["description"], "parameters": t["input_schema"]}} for t in tool_specs]

@@ -738,3 +738,37 @@ def test_rejected_key_is_reported_as_such(net_env, monkeypatch):
     monkeypatch.setattr(net.httpx, "get", lambda *a, **k: _Resp(403))
     net.get("semantic_scholar", "https://x")
     assert "SEMANTIC_SCHOLAR_API_KEY" in net.source_health()["semantic_scholar"]["last_error"]
+
+
+def test_text_stored_by_an_earlier_run_is_rescrubbed_with_this_runs_authors():
+    """Live run: 90 author names reached state.json (caught only by the outbound contract) from
+    full texts reused out of the knowledge base, scrubbed back when those authors were unknown."""
+    import tools
+
+    class Store:
+        def search(self, query, paper_ids=None, k=3):
+            return [{"paper_id": "arxiv:0000.00001", "title": "T", "year": 2024, "section": "References",
+                     "score": 0.9, "text": "[12] Ann Example and Bob Sample. Grading with LLMs. 2024."}]
+    privacy.reset_run()
+    privacy.register_authors(["Ann Example", "Bob Sample"])           # found by THIS run's search
+    out, recs = privacy.scrub_known("As shown by Ann Example and Bob Sample (2024).", "x")
+    assert "Ann Example" not in out and recs
+    ctx = tools.VerifierToolContext([{"id": "arxiv:0000.00001", "title": "T", "year": 2024, "abstract": "a"}], store=Store())
+    text, _ = ctx.execute("search_corpus", {"query": "grading with large language models"})
+    assert "Ann Example" not in text and "Bob Sample" not in text
+    privacy.reset_run()
+
+
+def test_verifier_that_reads_nothing_cannot_support_a_gap(offline, monkeypatch):
+    """Live run (thinking on): the verifier made no tool call but its notes said it had checked
+    both papers and searched the corpus. Without a single read, the gap is unverified."""
+    from tests.fakes import FakeLLM
+    lazy = FakeLLM(use_tools=False)
+    monkeypatch.setattr(llm_client, "_call_anthropic", lazy.call)
+    monkeypatch.setattr(llm_client, "_tool_turn", lazy.tool_turn)
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5)
+    assert state["gap_candidates"]
+    for g in state["gap_candidates"]:
+        assert g["evidence_coverage"] == 0 and not g["verifier_supported"]
+        assert "did not read any cited paper" in g["verifier_decision_reason"]
+        assert g["confidence_level"] != "High"

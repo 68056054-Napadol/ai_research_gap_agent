@@ -274,7 +274,8 @@ class VerifierToolContext:
         return json.dumps(ctx, ensure_ascii=False), {"ok": True, "n_items": 1, "text_kind": kind, "policy_notes": notes}
 
     def _passages(self, hits: list, max_chars: int = 900) -> list:
-        for h in hits:
+        for h in hits:   # stored chunks may predate this run's author list (privacy.scrub_known)
+            h["text"] = privacy.scrub_known(h["text"], f"{h['paper_id']}:passage")[0]
             self._shown(h["paper_id"], h["text"][:max_chars])
             self.seen_meta.setdefault(h["paper_id"], {"title": h.get("title"), "year": h.get("year")})
         return [{"paper_id": h["paper_id"], "title": h["title"], "year": h["year"], "section": h["section"],

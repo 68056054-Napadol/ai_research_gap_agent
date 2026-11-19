@@ -712,6 +712,25 @@ problems. What changed, and what was measured:
 5. **UI.** One click runs (form), default 8 papers, and the trend summary names papers by short
    title (`Grade Guard (2025)`) instead of ids or the internal "Quote verified" flag.
 
+### Thinking mode (`OLLAMA_THINK`) — measured
+
+Same topic ("large language models for automated code review"), 8 papers, all three sources,
+extraction cache off, qwen3:14b, one run each:
+
+| | thinking off | thinking on |
+|---|---|---|
+| run time | **8.4 min** | 12.5 min (+48 %) |
+| output tokens | **5.7k** | 18.7k (3.3×) |
+| extraction quotes found in the paper | 4/8 | 4/8 |
+| verifier tool calls | **12** (every gap read its papers) | 6 — one gap read **nothing**, yet its notes said it had |
+| gaps matching a stock theme | 2 of 4 | **1 of 3** |
+| gap wording | "there is a lack of X" | concrete proposals ("a unified benchmark across languages and task types") |
+
+Thinking gave more specific gaps but checked them less, and once claimed a check it never ran. It
+stays **off** by default. That run is why a verifier that reads none of the cited papers can no
+longer mark a gap as supported (`nodes.analyze_gaps`). With thinking on, the reply budget in the
+context window grows by 6k tokens so the reasoning trace cannot push the paper text out.
+
 ## Dashboard
 
 Sidebar → **Page: 📊 Dashboard** reads every saved run in `output/` (`dashboard.py` for the data,

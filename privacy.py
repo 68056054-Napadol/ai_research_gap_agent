@@ -234,6 +234,16 @@ def mask_text(text: str) -> str:
     return out
 
 
+def scrub_known(text: str, where: str) -> tuple:
+    """Redact what this run already knows (regex + this run's author list) - no LLM. For text that
+    was scrubbed in an EARLIER run and stored (knowledge base, cached PDF): that run's author list
+    did not include the authors this run found, so their names in the references survived. A live
+    run caught 90 such names only at the outbound contract."""
+    if not text:
+        return text, []
+    return decide_and_redact(text, regex_detect(text) + metadata_detect(text), "paper_text", where)
+
+
 def mask_any(obj):
     """Recursively apply mask_text to every string in a JSON-like structure."""
     if isinstance(obj, str):
