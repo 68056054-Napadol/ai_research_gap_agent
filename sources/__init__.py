@@ -54,18 +54,30 @@ def search_all(query: str, sources: list[str], year_from=None, year_to=None, lim
     return _dedupe(results)
 
 
+def _title_key(title: str) -> str:
+    return "".join(ch for ch in (title or "").lower() if ch.isalnum())
+
+
 def _dedupe(papers: list[dict]) -> list[dict]:
-    """Dedup by DOI first (most reliable), then by lowercased/normalized title."""
-    seen_doi, seen_title, out = set(), set(), []
+    """One entry per paper: a paper is a duplicate when its DOI OR its normalized title was seen.
+    (Before, a title was only checked when the paper had no DOI, so the same paper from arXiv - no
+    DOI - and OpenAlex - with a DOI - was analysed twice in a live run.) Fields the kept entry is
+    missing (abstract, PDF link, DOI, citations) are filled from the duplicate."""
+    by_doi, by_title, out = {}, {}, []
     for p in papers:
         doi = (p.get("doi") or "").strip().lower()
-        title_key = "".join((p.get("title") or "").lower().split())
-        if doi and doi in seen_doi:
-            continue
-        if not doi and title_key in seen_title:
+        tkey = _title_key(p.get("title"))
+        kept = (by_doi.get(doi) if doi else None) or (by_title.get(tkey) if tkey else None)
+        if kept is not None:
+            for field in ("abstract", "oa_pdf_url", "doi", "citation_count", "year"):
+                if not kept.get(field) and p.get(field):
+                    kept[field] = p[field]
+            if doi:
+                by_doi.setdefault(doi, kept)
             continue
         if doi:
-            seen_doi.add(doi)
-        seen_title.add(title_key)
+            by_doi[doi] = p
+        if tkey:
+            by_title[tkey] = p
         out.append(p)
     return out

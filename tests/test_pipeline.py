@@ -611,3 +611,15 @@ def test_title_only_papers_get_slack_at_the_cut_off():
               {"id": "b", "abstract": "", "similarity_score": 0.48},
               {"id": "c", "abstract": "", "similarity_score": 0.40}]
     assert [p["id"] for p in embeddings.filter_by_threshold(ranked, 0.50)] == ["b"]
+
+
+def test_same_paper_from_two_sources_is_kept_once():
+    """Live run: the same paper came from arXiv (no DOI) and OpenAlex (with a DOI) and was
+    extracted twice."""
+    a = {"id": "arxiv:1", "title": "Automated Essay Scoring Using Efficient Transformer-Based Language Models",
+         "doi": None, "abstract": "", "oa_pdf_url": "https://arxiv.org/pdf/1"}
+    b = {"id": "openalex:W1", "title": "Automated essay scoring using efficient transformer-based language models.",
+         "doi": "10.1000/xyz", "abstract": "We study AES.", "oa_pdf_url": None, "citation_count": 7}
+    out = sources._dedupe([a, b])
+    assert [p["id"] for p in out] == ["arxiv:1"]
+    assert out[0]["abstract"] == "We study AES." and out[0]["doi"] == "10.1000/xyz" and out[0]["citation_count"] == 7
