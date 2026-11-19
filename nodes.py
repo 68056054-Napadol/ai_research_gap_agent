@@ -594,6 +594,11 @@ def analyze_gaps(state: AgentState) -> dict:
             verifier_score = 5
         confidence_score = evidence_count_score + recency_score + verifier_score
         caps = _confidence_caps(state)
+        if verdict.get("counterexample_found") and not verdict.get("counterexample_verified"):
+            # not enough to refute the gap, but not nothing either: a live run had 3 of 4 gaps where
+            # the verifier pointed at a paper it could not quote - keep the gap, flag it, no High
+            caps = caps + [f"verifier named a possible counterexample ({verdict.get('counterexample_paper_id') or 'no id'}) "
+                           "but could not quote it - check that paper"]
         if caps and confidence_score > CONFIDENCE_CAP_SCORE:
             confidence_score = CONFIDENCE_CAP_SCORE
         confidence_level = "High" if confidence_score >= 75 else "Medium" if confidence_score >= 45 else "Low"

@@ -684,6 +684,7 @@ def test_dashboard_statuses_categories_and_refuting_paper(tmp_path):
              quote="a model evaluation mechanism composed of human verifiers"),
         _gap("Old-format gap refuted without a quote", supported=False, ce="openalex:W9"),       # pre-quote run
         _gap("Claims more than the sources say about datasets", supported=False, verified=False),
+        _gap("Unquoted counterexample keeps the gap but flags it", ce="openalex:W9", verified=False),
     ], papers)
     rows = dashboard.gap_rows(dashboard.load_runs(str(tmp_path)))
     by = {r["claim"][:20]: r for r in rows}
@@ -695,6 +696,7 @@ def test_dashboard_statuses_categories_and_refuting_paper(tmp_path):
     assert by["Old-format gap refut"]["status"] == dashboard.STATUS_REFUTED_OLD
     assert by["Claims more than the"]["status"] == dashboard.STATUS_NOT_SUPPORTED
     assert by["Old-format gap refut"]["category_source"] == "rules"
+    assert by["Unquoted counterexam"]["status"] == dashboard.STATUS_CONTESTED
     assert dashboard.summary(rows, dashboard.load_runs(str(tmp_path)))["refuted"] == 2
 
 

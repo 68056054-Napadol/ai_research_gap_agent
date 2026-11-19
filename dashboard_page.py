@@ -8,10 +8,11 @@ import streamlit as st
 import dashboard as dash
 from config import CONFIG
 
-STATUS_ORDER = [dash.STATUS_SUPPORTED, dash.STATUS_NOT_SUPPORTED, dash.STATUS_REFUTED, dash.STATUS_REFUTED_OLD]
-STATUS_COLOR = {dash.STATUS_SUPPORTED: "#2e9e5b", dash.STATUS_NOT_SUPPORTED: "#9aa0a6",
+STATUS_ORDER = [dash.STATUS_SUPPORTED, dash.STATUS_CONTESTED, dash.STATUS_NOT_SUPPORTED, dash.STATUS_REFUTED,
+                dash.STATUS_REFUTED_OLD]
+STATUS_COLOR = {dash.STATUS_SUPPORTED: "#2e9e5b", dash.STATUS_CONTESTED: "#e6c229", dash.STATUS_NOT_SUPPORTED: "#9aa0a6",
                 dash.STATUS_REFUTED: "#d64545", dash.STATUS_REFUTED_OLD: "#f0a04b"}
-STATUS_ICON = {dash.STATUS_SUPPORTED: "✅", dash.STATUS_NOT_SUPPORTED: "⚪",
+STATUS_ICON = {dash.STATUS_SUPPORTED: "✅", dash.STATUS_CONTESTED: "⚠️", dash.STATUS_NOT_SUPPORTED: "⚪",
                dash.STATUS_REFUTED: "❌", dash.STATUS_REFUTED_OLD: "❔"}
 
 
@@ -105,6 +106,16 @@ def render():
             if g.get("counterexample_quote"):
                 st.markdown(f"> “{g['counterexample_quote']}”")
             st.caption(f"Verdict rule: {g['verdict_reason']}")
+
+    # ---- possible counterexamples the verifier could not quote ----
+    contested = [g for g in sel if g["status"] == dash.STATUS_CONTESTED]
+    if contested:
+        st.subheader(f"⚠️ Possible counterexamples to check ({len(contested)})")
+        st.caption("The verifier named a paper that may already do this, but could not quote a sentence that shows it. "
+                   "The gap is kept, capped below High - open the paper and decide.")
+        st.dataframe(pd.DataFrame([{"topic": g["topic"], "gap": g["claim"], "check paper": g["counterexample_id"]}
+                                   for g in contested]), hide_index=True, width="stretch",
+                     column_config={"gap": st.column_config.TextColumn(width="large")})
 
     # ---- stock gaps ----
     rec = dash.recurring_gaps(sel)

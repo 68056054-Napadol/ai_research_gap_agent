@@ -36,6 +36,7 @@ STATUS_SUPPORTED = "Supported"
 STATUS_REFUTED = "Refuted by a paper"
 STATUS_REFUTED_OLD = "Refuted (older rule, no quote)"
 STATUS_NOT_SUPPORTED = "Not supported"
+STATUS_CONTESTED = "Possible counterexample (unquoted)"
 
 
 
@@ -80,6 +81,8 @@ def gap_status(g: dict) -> str:
         if facts.get("counterexample_found") and "counterexample_verified" not in facts:
             return STATUS_REFUTED_OLD
         return STATUS_NOT_SUPPORTED
+    if facts.get("counterexample_found") and facts.get("counterexample_verified") is False:
+        return STATUS_CONTESTED
     return STATUS_SUPPORTED
 
 
@@ -117,6 +120,7 @@ def gap_rows(runs: list) -> list:
                 "rationale": g.get("rationale", ""),
                 "supporting_papers": g.get("supporting_papers") or [],
                 "counterexample_paper": _counterexample(g, papers_by_id) if status != STATUS_SUPPORTED else None,
+                "counterexample_id": facts.get("counterexample_paper_id"),
                 "counterexample_quote": facts.get("counterexample_quote") if status in (STATUS_REFUTED, STATUS_REFUTED_OLD) else None,
                 "model": info.get("model_strong", ""),
             })
@@ -216,6 +220,7 @@ def summary(gap_list: list, runs: list) -> dict:
         "gaps": len(gap_list), "supported": statuses.count(STATUS_SUPPORTED),
         "refuted": statuses.count(STATUS_REFUTED) + statuses.count(STATUS_REFUTED_OLD),
         "not_supported": statuses.count(STATUS_NOT_SUPPORTED),
+        "contested": statuses.count(STATUS_CONTESTED),
         "high": sum(1 for g in gap_list if g["confidence_level"] == "High"),
         "mean_confidence": round(sum(scores) / len(scores), 1) if scores else None,
     }
