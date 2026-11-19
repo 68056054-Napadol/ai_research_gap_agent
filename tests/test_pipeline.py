@@ -704,7 +704,8 @@ def test_dashboard_flags_gaps_that_recur_across_topics(tmp_path):
     _saved_state(tmp_path, "20261119_110000", "short answer grading", [_gap("Lack of research on short answer grading in non-English languages", category="Language & population")])
     _saved_state(tmp_path, "20261119_120000", "rag hallucination", [_gap("Combining retrieval graphs with entity verification is unexplored", category="Method combination")])
     rec = dashboard.recurring_gaps(dashboard.gap_rows(dashboard.load_runs(str(tmp_path))))
-    assert len(rec) == 1 and rec[0]["n_topics"] == 2 and rec[0]["category"] == "Language & population"
+    assert len(rec) == 1 and rec[0]["n_topics"] == 2 and rec[0]["theme"] == "Non-English / low-resource languages"
+    assert dashboard.rule_category("Large language models lack calibration for grading") != "Language & population"
 
 
 def test_dashboard_page_renders(tmp_path, monkeypatch):

@@ -9,6 +9,8 @@ import dashboard as dash
 from config import CONFIG
 
 STATUS_ORDER = [dash.STATUS_SUPPORTED, dash.STATUS_NOT_SUPPORTED, dash.STATUS_REFUTED, dash.STATUS_REFUTED_OLD]
+STATUS_COLOR = {dash.STATUS_SUPPORTED: "#2e9e5b", dash.STATUS_NOT_SUPPORTED: "#9aa0a6",
+                dash.STATUS_REFUTED: "#d64545", dash.STATUS_REFUTED_OLD: "#f0a04b"}
 STATUS_ICON = {dash.STATUS_SUPPORTED: "✅", dash.STATUS_NOT_SUPPORTED: "⚪",
                dash.STATUS_REFUTED: "❌", dash.STATUS_REFUTED_OLD: "❔"}
 
@@ -18,6 +20,12 @@ def _link(p: dict | None) -> str:
         return ""
     label = f"{p.get('title') or p.get('id')} ({p.get('year') or 'n.d.'})"
     return f"[{label}]({p['url']})" if p.get("url") else label
+
+
+def _by_status(df: pd.DataFrame, index: str) -> pd.DataFrame:
+    """Counts per index value and verdict, verdict columns in a fixed order (and fixed colours)."""
+    pivot = df.pivot_table(index=index, columns="status", values="claim", aggfunc="count", fill_value=0)
+    return pivot[[c for c in STATUS_ORDER if c in pivot.columns]]
 
 
 def render():
@@ -58,12 +66,13 @@ def render():
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Gaps by category")
-        pivot = df.pivot_table(index="category", columns="status", values="claim", aggfunc="count", fill_value=0)
-        st.bar_chart(pivot, horizontal=True, height=320)
+        pivot = _by_status(df, "category")
+        st.bar_chart(pivot, horizontal=True, height=320, color=[STATUS_COLOR[c] for c in pivot.columns])
     with c2:
         st.subheader("Confidence by verdict")
-        pivot = df.pivot_table(index="confidence_level", columns="status", values="claim", aggfunc="count", fill_value=0)
-        st.bar_chart(pivot.reindex([x for x in ["High", "Medium", "Low"] if x in pivot.index]), height=320)
+        pivot = _by_status(df, "confidence_level")
+        pivot = pivot.reindex([x for x in ["High", "Medium", "Low"] if x in pivot.index])
+        st.bar_chart(pivot, height=320, color=[STATUS_COLOR[c] for c in pivot.columns])
 
     # ---- all gaps ----
     st.subheader(f"All gaps ({len(sel)})")
@@ -99,12 +108,13 @@ def render():
 
     # ---- stock gaps ----
     rec = dash.recurring_gaps(sel)
-    st.subheader(f"🔁 Gaps that recur across different topics ({len(rec)})")
-    st.caption("Near-identical gaps proposed for unrelated topics are usually generic - check that the papers "
-               "really motivate them before using one.")
+    st.subheader(f"🔁 Stock gaps - themes that recur across different topics ({len(rec)})")
+    st.caption("The same kind of gap proposed for unrelated topics is usually generic - check that the papers "
+               "really motivate it before using one.")
     if rec:
-        st.dataframe(pd.DataFrame([{"category": r["category"], "example": r["example"], "gaps": r["n_gaps"],
-                                    "topics": r["n_topics"], "in topics": "; ".join(r["topics"])} for r in rec]),
+        st.dataframe(pd.DataFrame([{"theme": r["theme"], "topics": r["n_topics"], "gaps": r["n_gaps"],
+                                    "refuted": r["refuted"], "example": r["example"],
+                                    "in topics": "; ".join(r["topics"])} for r in rec]),
                      hide_index=True, width="stretch",
                      column_config={"example": st.column_config.TextColumn(width="large")})
     else:

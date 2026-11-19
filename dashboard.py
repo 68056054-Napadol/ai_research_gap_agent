@@ -17,8 +17,10 @@ from contracts import GAP_CATEGORIES
 
 # Keyword rules for runs saved before the proposer assigned categories. First match wins.
 _CATEGORY_RULES = [
-    ("Language & population", r"non-english|multilingual|cross-lingual|low-resource language|languages?\b|"
-                              r"dialect|region|population|children|primary|k-12|students? from|culture"),
+    # not plain "language": every LLM gap says "large language models"
+    ("Language & population", r"non-english|multilingual|cross-lingual|low-resource language|languages other|"
+                              r"under-?represented language|dialect|region|population|children|primary school|"
+                              r"k-12|culture|thai|arabic|chinese"),
     ("Efficiency & deployment", r"real-time|latency|efficien|lightweight|small(er)? model|on-device|cost|"
                                 r"scalab|deploy|compute"),
     ("Reliability, fairness & explainability", r"bias|fair|robust|adversarial|explain|interpret|transparen|"
@@ -35,10 +37,6 @@ STATUS_REFUTED = "Refuted by a paper"
 STATUS_REFUTED_OLD = "Refuted (older rule, no quote)"
 STATUS_NOT_SUPPORTED = "Not supported"
 
-_STOP = {"the", "a", "an", "of", "in", "on", "for", "and", "or", "to", "with", "is", "are", "be", "by",
-         "there", "lack", "limited", "research", "exploration", "explored", "underexplored", "remains",
-         "insufficient", "use", "using", "systems", "system", "models", "model", "large", "language",
-         "llm", "llms", "based", "particularly", "such", "as", "has", "not", "been", "that", "this"}
 
 
 def rule_category(claim: str) -> str:
@@ -169,36 +167,44 @@ def paper_rows(runs: list) -> list:
     return out
 
 
-def _signature(claim: str) -> set:
-    return {w for w in re.findall(r"[a-z][a-z-]+", (claim or "").lower()) if w not in _STOP and len(w) > 2}
+# Stock gaps: themes an LLM proposes for almost any topic. A theme that shows up under several
+# unrelated topics is a hint to check whether these papers really motivate it.
+STOCK_THEMES = {
+    "Non-English / low-resource languages": r"non-english|multilingual|cross-lingual|low-resource language|"
+                                            r"languages other than|under-?represented language",
+    "Real-time / interactive use": r"real-time|interactive|adaptive learning|online tutoring|dynamic feedback",
+    "Multimodal data": r"multimodal|multi-modal|image|audio|video",
+    "Explainability": r"explainab|interpretab|transparen",
+    "Bias & fairness": r"\bbias|fairness|equit",
+    "Standardised evaluation": r"standardi[sz]ed (evaluation|metric|benchmark)|unified (evaluation|benchmark)|"
+                               r"lack of (common|shared) benchmark",
+    "Efficiency / small models": r"lightweight|small(er)? (language )?models?|efficien|low-cost|on-device",
+    "Low-resource / underrepresented settings": r"low-resource (setting|domain|educational)|under-?represented "
+                                                r"(domain|setting|group|region)|developing countr",
+}
 
 
-def recurring_gaps(gap_list: list, min_topics: int = 2, threshold: float = 0.3) -> list:
-    """Gaps that come back almost word for word under DIFFERENT topics - a sign the model is
-    proposing a stock gap ("non-English settings are under-explored") rather than one these
-    papers motivate. Groups by word overlap (Jaccard) within the same category, after removing the
-    run's own topic words from each claim - what is left is the "stock" part of the gap."""
-    groups = []
+def stock_themes(claim: str) -> list:
+    text = (claim or "").lower()
+    return [t for t, rx in STOCK_THEMES.items() if re.search(rx, text)]
+
+
+def recurring_gaps(gap_list: list, min_topics: int = 2) -> list:
+    """Stock themes (STOCK_THEMES) that gaps under at least `min_topics` different topics share -
+    usually a stock answer ("non-English settings are under-explored") rather than a gap these
+    papers motivate."""
+    by_theme = {}
     for row in gap_list:
-        sig = _signature(row["claim"]) - _signature(row["topic"])
-        for grp in groups:
-            if grp["category"] == row["category"] and _jaccard(sig, grp["sig"]) >= threshold:
-                grp["rows"].append(row)
-                grp["sig"] |= sig
-                break
-        else:
-            groups.append({"category": row["category"], "sig": set(sig), "rows": [row]})
+        for theme in stock_themes(row["claim"]):
+            by_theme.setdefault(theme, []).append(row)
     out = []
-    for grp in groups:
-        topics = sorted({r["topic"] for r in grp["rows"]})
+    for theme, rows in by_theme.items():
+        topics = sorted({r["topic"] for r in rows})
         if len(topics) >= min_topics:
-            out.append({"category": grp["category"], "example": grp["rows"][0]["claim"],
-                        "n_gaps": len(grp["rows"]), "n_topics": len(topics), "topics": topics})
+            out.append({"theme": theme, "category": rows[0]["category"], "example": rows[0]["claim"],
+                        "n_gaps": len(rows), "n_topics": len(topics), "topics": topics,
+                        "refuted": sum(1 for r in rows if r["status"] in (STATUS_REFUTED, STATUS_REFUTED_OLD))})
     return sorted(out, key=lambda g: (-g["n_topics"], -g["n_gaps"]))
-
-
-def _jaccard(a: set, b: set) -> float:
-    return len(a & b) / len(a | b) if a and b else 0.0
 
 
 def summary(gap_list: list, runs: list) -> dict:
