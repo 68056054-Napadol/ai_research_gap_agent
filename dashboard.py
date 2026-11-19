@@ -138,7 +138,8 @@ def run_rows(runs: list) -> list:
         out.append({
             "time": run["time"], "topic": st.get("research_topic", ""), "run_id": run["run_id"],
             "minutes": round(info["seconds"] / 60, 1) if info.get("seconds") else None,
-            "model": info.get("model_strong", "") + (" (thinking)" if info.get("think") else ""),
+            "model": info.get("model_strong", "") + (" (thinking)" if info.get("think") else
+                                                     f" (thinking: {', '.join(info['think_purposes'])})" if info.get("think_purposes") else ""),
             "candidates": len(st.get("candidate_papers") or []), "analyzed": len(st.get("paper_extracts") or []),
             "sources_answered": ", ".join(sorted(s for s, h in health.items() if h.get("ok"))) or ("?" if not health else "none"),
             "sources_failed": ", ".join(sorted(s for s, h in health.items() if not h.get("ok"))),

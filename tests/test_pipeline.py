@@ -48,6 +48,8 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(CONFIG, "privacy_llm_on_papers", "auto")
     monkeypatch.setattr(CONFIG, "ranking_embedding", "sentence_transformers:BAAI/bge-small-en-v1.5")
     monkeypatch.setattr(CONFIG, "high_confidence_min_papers", 8)
+    monkeypatch.setattr(CONFIG, "ollama_think", False)
+    monkeypatch.setattr(CONFIG, "ollama_think_purposes", frozenset())
     monkeypatch.setattr(CONFIG, "high_confidence_min_sources", 2)
     monkeypatch.setattr(CONFIG, "tracing_enabled", True)
     return fake
@@ -772,3 +774,40 @@ def test_verifier_that_reads_nothing_cannot_support_a_gap(offline, monkeypatch):
         assert g["evidence_coverage"] == 0 and not g["verifier_supported"]
         assert "did not read any cited paper" in g["verifier_decision_reason"]
         assert g["confidence_level"] != "High"
+
+
+def test_thinking_can_be_switched_on_for_chosen_steps_only(monkeypatch):
+    monkeypatch.setattr(CONFIG, "ollama_think", False)
+    monkeypatch.setattr(CONFIG, "ollama_think_purposes", frozenset({"propose-gaps", "synthesize-trends"}))
+    assert llm_client.ollama_profile("qwen3:14b")["think"] is False
+    with llm_client.purpose_scope("propose-gaps-retry"):
+        assert llm_client.ollama_profile("qwen3:14b")["think"] is True
+        assert llm_client._reply_reserve("qwen3:14b") == 2048 + 6144
+    with llm_client.purpose_scope("extract-paper-facts"):
+        assert llm_client.ollama_profile("qwen3:14b")["think"] is False
+    with llm_client.purpose_scope("propose-gaps"):
+        assert llm_client.ollama_profile("gpt-oss:20b")["think"] == "low"      # model profile still wins
+
+
+def test_hybrid_thinking_reaches_only_the_chosen_steps_in_a_full_run(offline, monkeypatch):
+    """Local backend, OLLAMA_THINK=false, OLLAMA_THINK_PURPOSES=propose-gaps,synthesize-trends:
+    the proposer and the trend synthesis think; extraction, search and verifier agents do not."""
+    from tests.fakes import FakeLLM
+    fake, seen = FakeLLM(), []
+
+    def local_call(prompt, system, tier, json_mode=False):
+        seen.append((getattr(llm_client._current, "purpose", None), llm_client.ollama_profile("qwen3:14b")["think"]))
+        return fake.call(prompt, system, tier, json_mode)
+
+    def local_turn(*a, **k):
+        seen.append((getattr(llm_client._current, "purpose", None), llm_client.ollama_profile("qwen3:14b")["think"]))
+        return fake.tool_turn(*a, **k)
+    monkeypatch.setattr(CONFIG, "llm_backend", "local")
+    monkeypatch.setattr(llm_client, "_call_ollama", local_call)
+    monkeypatch.setattr(llm_client, "_tool_turn", local_turn)
+    monkeypatch.setattr(CONFIG, "ollama_think_purposes", frozenset({"propose-gaps", "synthesize-trends"}))
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5)
+    thinking = {p for p, t in seen if t}
+    assert thinking == {"propose-gaps", "synthesize-trends"}
+    assert {"search-agent", "verifier-agent", "extract-paper-facts"} <= {p for p, t in seen if not t}
+    assert state["run_info"]["think_purposes"] == ["propose-gaps", "synthesize-trends"]

@@ -107,6 +107,7 @@ def run_info(started: float, max_papers: int, entrypoint: str) -> dict:
         "enabled_sources": list(CONFIG.enabled_sources),
         "ranking_embedding": CONFIG.ranking_embedding,
         "think": bool(CONFIG.ollama_think) if local else None,
+        "think_purposes": sorted(CONFIG.ollama_think_purposes) if local else [],
     }
 
 

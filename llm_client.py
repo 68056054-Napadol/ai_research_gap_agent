@@ -37,6 +37,28 @@ DEFAULT_SYSTEM = "You are a precise research-assistant AI. Follow output format 
 # Reasoning text of the last local call (Ollama streams it under message["thinking"] when
 # OLLAMA_THINK=true). Thread-local because the UI runs the agent in a background thread.
 _last = threading.local()
+# Purpose of the LLM call in progress (also thread-local) - lets OLLAMA_THINK_PURPOSES switch
+# thinking on for some steps only.
+_current = threading.local()
+
+
+class purpose_scope:
+    """with purpose_scope("propose-gaps"): ... - calls inside get that purpose's think setting."""
+    def __init__(self, purpose: str):
+        self.purpose = (purpose or "").removesuffix("-retry")
+
+    def __enter__(self):
+        self.prev = getattr(_current, "purpose", None)
+        _current.purpose = self.purpose
+        return self
+
+    def __exit__(self, *exc):
+        _current.purpose = self.prev
+        return False
+
+
+def think_for_current_call() -> bool:
+    return CONFIG.ollama_think or getattr(_current, "purpose", None) in CONFIG.ollama_think_purposes
 
 
 def _take_reasoning() -> str:
@@ -84,12 +106,15 @@ def call(prompt: str, system: str = "", tier: str = "fast", json_mode: bool = Fa
                          input=[{"role": "system", "content": system or DEFAULT_SYSTEM},
                                 {"role": "user", "content": prompt}],
                          model_parameters={"temperature": CONFIG.llm_temperature, "json_mode": json_mode},
-                         metadata={"tier": tier, "backend": CONFIG.llm_backend}) as obs:
+                         metadata={"tier": tier, "backend": CONFIG.llm_backend,
+                                   "think": CONFIG.llm_backend == "local" and (CONFIG.ollama_think
+                                                                              or purpose.removesuffix("-retry") in CONFIG.ollama_think_purposes)}) as obs:
         try:
             if CONFIG.llm_backend == "cloud":
                 result = _call_anthropic(prompt, system, tier, json_mode)
             elif CONFIG.llm_backend == "local":
-                result = _call_ollama(prompt, system, tier, json_mode)
+                with purpose_scope(purpose):
+                    result = _call_ollama(prompt, system, tier, json_mode)
             else:
                 raise LLMError(f"Unknown LLM_BACKEND: {CONFIG.llm_backend!r} (expected 'cloud' or 'local')")
         except Exception as e:
@@ -315,7 +340,7 @@ def ollama_profile(model: str) -> dict:
     for key, profile in OLLAMA_PROFILES:
         if key in model:
             return profile
-    return {"think": CONFIG.ollama_think, "json_format": True}
+    return {"think": think_for_current_call(), "json_format": True}
 
 
 def _ollama_options(num_ctx: int) -> dict:
@@ -379,7 +404,8 @@ def run_tool_loop(system: str, user_prompt: str, tool_specs: list, executor: Too
     call a retriever/tool observation - siblings, as the Langfuse best practices ask."""
     with tracing.observe(tracing.hyphen(agent_name), "agent", input=user_prompt,
                          metadata={"tools": [t["name"] for t in tool_specs], **(trace_metadata or {})}) as agent_obs:
-        result = _run_tool_loop(system, user_prompt, tool_specs, executor, tier, max_steps, agent_name)
+        with purpose_scope(tracing.hyphen(agent_name)):
+            result = _run_tool_loop(system, user_prompt, tool_specs, executor, tier, max_steps, agent_name)
         agent_obs.update(output=result.final_text,
                          metadata={"steps": result.steps, "tool_calls": len(result.trace),
                                    "hit_step_limit": result.hit_step_limit, **(trace_metadata or {})})

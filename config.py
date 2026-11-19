@@ -63,6 +63,11 @@ class Config:
     # in llm_client._call_ollama. Set OLLAMA_THINK=true to re-enable if you have faster
     # hardware and want to try it for the "strong" tier's reasoning quality.
     ollama_think: bool = os.getenv("OLLAMA_THINK", "false").strip().lower() in ("1", "true", "yes")
+    # Thinking for chosen steps only (comma-separated LLM-call purposes, e.g.
+    # "propose-gaps,synthesize-trends"; tool loops use their agent name: "search-agent",
+    # "verifier-agent"). Overrides OLLAMA_THINK=false for those steps. See README "Thinking mode".
+    ollama_think_purposes: frozenset = frozenset(
+        p.strip() for p in os.getenv("OLLAMA_THINK_PURPOSES", "").split("#", 1)[0].split(",") if p.strip())
     # Ceiling for llm_client's per-call num_ctx sizing (see _call_ollama). Ollama otherwise
     # defaults to a small context window (often 2048-4096 tokens) regardless of prompt size,
     # which would silently truncate a long full-text extraction prompt from the *model's* side

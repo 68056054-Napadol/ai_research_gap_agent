@@ -712,24 +712,36 @@ problems. What changed, and what was measured:
 5. **UI.** One click runs (form), default 8 papers, and the trend summary names papers by short
    title (`Grade Guard (2025)`) instead of ids or the internal "Quote verified" flag.
 
-### Thinking mode (`OLLAMA_THINK`) — measured
+### Thinking mode (`OLLAMA_THINK`, `OLLAMA_THINK_PURPOSES`) — measured
 
 Same topic ("large language models for automated code review"), 8 papers, all three sources,
-extraction cache off, qwen3:14b, one run each:
+extraction cache off, qwen3:14b, one run each. "Hybrid" = `OLLAMA_THINK=false`,
+`OLLAMA_THINK_PURPOSES=propose-gaps,synthesize-trends` (thinking only where gaps are written).
 
-| | thinking off | thinking on |
-|---|---|---|
-| run time | **8.4 min** | 12.5 min (+48 %) |
-| output tokens | **5.7k** | 18.7k (3.3×) |
-| extraction quotes found in the paper | 4/8 | 4/8 |
-| verifier tool calls | **12** (every gap read its papers) | 6 — one gap read **nothing**, yet its notes said it had |
-| gaps matching a stock theme | 2 of 4 | **1 of 3** |
-| gap wording | "there is a lack of X" | concrete proposals ("a unified benchmark across languages and task types") |
+| | thinking off | hybrid | thinking everywhere |
+|---|---|---|---|
+| run time | 7.0 min | **6.5 min** | 12.5 min |
+| output tokens | **4.5k** | 5.2k | 18.7k |
+| same 8 papers as "off" | — | 8/8 | 1/8 |
+| extraction quotes found in the paper | 4/8 | 4/8 | 4/8 |
+| verifier read every cited paper | yes (12 tool calls) | yes (9) | **no** — one gap read nothing |
+| gaps: supported / refuted / not supported / unquoted counterexample | 3 / 0 / 0 / 1 | 1 / 1 / 1 / 0 | 3 / 0 / 0 / 0 |
+| gap wording | "there is a lack of X" | specific ("CodeReviewQA's three-step decomposition…") | concrete proposals |
 
-Thinking gave more specific gaps but checked them less, and once claimed a check it never ran. It
-stays **off** by default. That run is why a verifier that reads none of the cited papers can no
-longer mark a gap as supported (`nodes.analyze_gaps`). With thinking on, the reply budget in the
-context window grows by 6k tokens so the reasoning trace cannot push the paper text out.
+- **Off** is reproducible: two runs hours apart gave the same 4 gaps word for word (temperature 0,
+  seed 42). Its gaps are generic and pass verification easily.
+- **Hybrid** costs nothing extra in time, keeps the verifier thorough, and writes bolder, more
+  specific gaps — and the verifier then rejected two of three (one refuted by a quoted sentence,
+  one whose papers did not concern it). Fewer gaps survive, but the survivor is a real one.
+- **Thinking everywhere** is twice as slow and made the verifier skip its tools.
+
+One run per setting is a direction, not a verdict, so the default stays **off** and hybrid is one
+line in `.env`. The thinking-everywhere run is why a verifier that reads none of the cited papers
+can no longer mark a gap as supported (`nodes.analyze_gaps`), and with thinking on for a step the
+reply budget in the context window grows by 6k tokens so the reasoning cannot push the paper text out.
+A caveat the hybrid run exposed: the counterexample check proves the quote is in the paper, not
+that it refutes the gap ("the chosen datasets encompass the entire code review process" was used
+against a gap about multi-modal datasets) — the Dashboard shows the quote so a person can judge.
 
 ## Dashboard
 
