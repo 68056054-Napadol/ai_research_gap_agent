@@ -1096,3 +1096,19 @@ def test_precision_at_10():
     scores = list(range(12, 0, -1))           # first 7 (on topic) score highest
     assert cr.precision_at(labels, scores, 10) == 0.7
     assert cr.precision_at(labels[:4], scores[:4], 10) == 1.0     # fewer than 10 candidates: use them all
+
+
+def test_readme_matches_the_code():
+    """README drift found in review: old observation names (node:<name>, llm:fast, tool:<name>) and a
+    stale test count."""
+    import re
+    import tracing
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    readme = open(os.path.join(root, "README.md"), encoding="utf-8").read()
+    for obs_name, obs_type in tracing.NODE_OBSERVATIONS.values():
+        assert f"`{obs_name}` ({obs_type})" in readme, obs_name
+    assert "`node:<name>`" not in readme and "`llm:fast`" not in readme
+    with open(__file__, encoding="utf-8") as f:
+        n_defs = sum(1 for line in f if line.startswith("def test_"))
+    counts = {int(n) for n in re.findall(r"(\d+) offline tests", readme)}
+    assert counts and all(n >= n_defs for n in counts), (counts, n_defs)   # parametrized tests count more than once

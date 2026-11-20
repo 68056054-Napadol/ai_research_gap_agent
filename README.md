@@ -63,7 +63,7 @@ the docx (§1–§9); this is just the map:
 | 4 | `check_sufficiency` | No LLM call — if too few papers passed the threshold, loops back to node 1 with feedback (capped at `MAX_RETRY_LOOPS`) |
 | 5 | `extract_paper_data` | Per paper: fetches the open-access PDF and converts it to Markdown if available (else uses the abstract), then extracts problem/method/dataset/findings/limitations/metrics (LLM, "fast" tier) |
 | 6 | `compare_papers` | Builds a comparison table across all extracted papers, then synthesizes cross-paper trends (LLM, "strong" tier) |
-| 7 | `analyze_gaps` | Proposes 2–4 Potential Research Gaps grounded in the table, drops cited ids that don't exist, then a **verifier agent** reads each cited paper's source text through the `get_paper_text` tool and returns a contract-validated verdict → confidence score |
+| 7 | `analyze_gaps` | Proposes 2–4 Potential Research Gaps grounded in the table, drops cited ids that don't exist, then a **verifier agent** reads each cited paper's source text through the `get_paper_text` tool and returns a contract-validated verdict → evidence level Strong / Moderate / Limited |
 | 8 | `privacy_guard` | Privacy check on the **final answer** (trend summary + gaps): regex + author list + LLM extraction → decision model → redaction |
 
 The "fast" vs "strong" model tiers, the hybrid cloud/local backend, the confidence-scoring
@@ -135,8 +135,8 @@ Research Gap goes through it before it's ever shown to the user. It happens insi
    checks three things against the cited papers' `paper_extracts`: does the evidence actually
    support the claim (or is it overstated), is the evidence recent or mostly old, and are there
    any counterexamples in the cited data that contradict the claim. It returns `supported: true/false`
-   plus `notes` explaining what it checked — that verdict directly feeds the confidence score
-   (`nodes.analyze_gaps`, the weighted formula covered in the docx §7.3), and the notes are shown
+   plus `notes` explaining what it checked — that verdict feeds the evidence level
+   ([Evidence levels](#evidence-levels-strong--moderate--limited)), and the notes are shown
    to the user alongside each gap in both the web UI and the Markdown report.
 
 **The limitation this used to have, and how it's now closed:** the node 7 verifier above checks
@@ -177,8 +177,9 @@ are visible to the user rather than collapsed into one score.
 
 **Now done — source-grounded verification:** the verifier is a tool-calling agent. It is given
 the extracted summaries *and* the `get_paper_text` tool, is told to read every cited paper's
-source text before deciding, and its confidence score only gets full verifier points if it really
-read at least half of the cited sources (`evidence_coverage`, shown next to every gap). Cited ids
+source text before deciding, and a gap only reaches Moderate when the verifier really read at
+least half of the cited sources, Strong only when it read all of them (`evidence_coverage`, shown
+next to every gap). Cited ids
 that are not among the analyzed papers are dropped before verification (`dropped_ids`) — they
 used to count as evidence. The original note, kept for context: node 7's verifier used to only
 see `paper_extracts`, never the original source text. **Source-grounded verification** — giving
@@ -300,8 +301,11 @@ A few notes on what to expect:
   Streamlit (the web UI). It also downloads a small (~130MB) embedding model the *first time the
   ranking step actually runs* (not during `pip install`) — expect a one-time pause the first time
   you run the agent, not a hang.
-- **Step 5** — you do *not* need every key filled in. `arxiv` and `openalex` work with no key at
-  all; `semantic_scholar` works unauthenticated at a lower rate limit. Add source API keys later
+- **Step 5** — you do *not* need every key filled in. `arxiv` works with no key at all;
+  `semantic_scholar` works unauthenticated at a lower rate limit (shared public pool). **`openalex`
+  needs a free `OPENALEX_API_KEY` since Feb 2026** ([get one](https://openalex.org/settings/api)) —
+  without it OpenAlex answers only a tiny daily allowance, the source drops out of the run, and
+  *Search scope* shows it as failed. Add source API keys later
   if you start hitting rate limits. You do need **either** `ANTHROPIC_API_KEY` filled in **or**
   Ollama installed locally (next section) before the agent can actually run — see
   [Choosing a model backend](#choosing-a-model-backend).
@@ -334,7 +338,9 @@ default — you only need to touch the ones relevant to your setup.
 | `SOURCE_MAX_RETRIES` / `SOURCE_RETRY_MAX_WAIT` / `SOURCE_DISABLE_AFTER_FAILURES` | `3` / `10` / `3` | Retries on 429/5xx (Retry-After honoured), and how many failed calls in a row switch a source off for the rest of the run |
 | `RANKING_EMBEDDING` | *(= `RAG_EMBEDDING`)* | Embedding Node 3 ranks candidates with |
 | `SIMILARITY_THRESHOLD` | *(per model)* | Override the relevance cut-off; defaults per model in `embeddings.RANKING_THRESHOLDS` |
-| `HIGH_CONFIDENCE_MIN_PAPERS` / `HIGH_CONFIDENCE_MIN_SOURCES` | `8` / `2` | A gap can only be **High** when the run analysed this many papers from this many sources that answered |
+| `HIGH_CONFIDENCE_MIN_PAPERS` / `HIGH_CONFIDENCE_MIN_SOURCES` | `8` / `2` | A gap can only be **Strong** when the run analysed this many papers from this many sources that answered |
+| `EVIDENCE_STRONG_*` / `EVIDENCE_MODERATE_*` | see [Evidence levels](#evidence-levels-strong--moderate--limited) | Per-gap thresholds for Strong / Moderate |
+| `MAX_RUN_TOKENS` | `0` (off) | Token budget per run; when used up, no more retry loops or verifier runs |
 | `PRIVACY_LLM_ON_PAPERS` | `always` | `always` / `auto` / `never` — see [Privacy](#privacy-llm-extraction--decision-model) |
 | `UNPAYWALL_EMAIL` | *(empty)* | Reserved for a future Unpaywall connector — see "What to build next" |
 | `MAX_CANDIDATE_PAPERS` | `80` | Broad search pool size (metadata only, cheap) |
@@ -439,16 +445,17 @@ rendered as readable cards instead of raw Markdown. See the next section for how
 3. **Watch the step cards** — one per pipeline node (see [Architecture](#architecture-in-brief)).
    Each card shows a status badge, what went into that step, and — once it finishes — a
    readable summary of what came out (queries generated, papers found, the actual gap claims
-   with confidence scores, etc.). The per-paper extraction step additionally shows a small live
+   with their evidence level and counts, etc.). The per-paper extraction step additionally shows a small live
    checklist (one line per paper) since that step is naturally the longest-running one.
 4. **The full run log stays visible below the cards**, live, for the whole run — this is the
    unfiltered detail (every LLM call, every search query, every retry) behind the cards above
    it. It's there by design, not hidden behind a click, so you can always see exactly what the
    agent is doing; there's also a download button for it.
 5. **Once the run finishes**, scroll down for: the list of papers actually analyzed (with
-   similarity scores), the cross-paper comparison table, the trend synthesis, and the candidate
-   Research Gaps — each with a color-coded confidence level (green/orange/red for
-   High/Medium/Low), the rationale, which papers support it, and the verifier's notes. A
+   similarity scores), the **Search scope**, the cross-paper comparison table, the trend synthesis,
+   and the **Potential Research Gaps** — each with a color-coded evidence level (green/orange/red
+   for Strong/Moderate/Limited) and its counts, the rationale, which papers support it, each
+   supporting paper's verified sentence, and the verifier's notes. A
    **"Download full report (.md)"** button at the bottom exports everything as one Markdown file
    — the same content the CLI writes to `output/`.
 6. A run also writes its state to `output/<timestamp>_state.json` in the background, same as the
@@ -478,7 +485,7 @@ to its abstract, same as before this feature existed — this never aborts a run
 
 ## Testing and verifying your setup
 
-Run `python -m pytest -q tests` first: 23 offline tests (fictional fake papers + a scripted LLM,
+Run `python -m pytest -q tests` first: 101 offline tests (fictional fake papers + a scripted LLM,
 no network or API key) covering tool calling, contracts, the decision model and privacy. Beyond
 that, "testing" means two things: **confirming your install works**, and **judging whether the
 agent's actual output is good**.
@@ -514,9 +521,9 @@ worksheet — full rationale in the docx §8) to check, across a handful of test
   in the saved `output/*_state.json` says the method/dataset/findings were.
 - **Gap quality** — rate each proposed gap 1–5 on novelty, evidence-groundedness, and
   actionability.
-- **Confidence calibration** — do gaps scored "High" actually hold up better under your own
-  manual review than ones scored "Low"? If not, the scoring formula in `nodes.analyze_gaps`
-  needs retuning (there's a `TODO` marking exactly where).
+- **Evidence-level calibration** — do gaps marked "Strong" actually hold up better under your
+  own manual review than ones marked "Limited"? If not, change the criteria in `config.py` (see
+  `evaluation/eval_plan.md` §6).
 
 Run this against at least 2–3 different topics — a system that only works on one cherry-picked
 topic isn't validated yet.
@@ -552,11 +559,12 @@ links.py                  # paper links from DOI/arXiv/OpenAlex/S2 metadata (nev
 tracing.py                # optional Langfuse tracing (no-op without keys)
 outbound.py               # outbound contract: no PII in traces, saved state or reports
 contracts.py              # pydantic contracts for every LLM output and tool argument
+evidence.py               # Potential Research Gaps wording, search scope, evidence levels + verified quotes
 privacy.py                # regex / metadata / LLM detectors + redaction
 decision_model/           # sensitive_info.dmn.json decision tables + evaluator
 metrics.py                # per-run counters (contracts, tool calls, tokens)
 tests/                    # offline tests with fictional fake papers + scripted LLM
-logging_utils.py          # shared logging setup used by both the CLI (--verbose) and the web UI
+logging_utils.py          # shared logging setup (CLI --verbose + web UI) + API-key masking filter
 sources/
   semantic_scholar.py      # search_papers / get_paper / get_full_text
   arxiv.py                  # same interface, arXiv backend
@@ -568,6 +576,12 @@ main.py                         # CLI entrypoint
 evaluation/eval_plan.md          # the evaluation methodology worksheet (see docx §8)
 evaluation/consistency_test.py   # same question N times -> similarity of answers
 evaluation/compare_models.py     # open-source (Ollama) vs commercial (Claude) on the same topics
+evaluation/calibrate_ranking.py  # relevance cut-off per embedding model: AUC, p@5/8/10 on hand labels
+evaluation/eval_extraction.py    # extraction vs human-filled extraction_gold CSV
+evaluation/eval_citations.py     # cited title/year/DOI vs OpenAlex + Crossref
+evaluation/eval_query_adaptation.py  # narrow topics: retry / new queries / more papers
+evaluation/data/*_TEMPLATE.csv   # empty templates the group fills in (no answers in the repo)
+dashboard.py / dashboard_page.py # Dashboard over all saved runs (data / Streamlit page)
 ```
 
 ## Run the MCP server standalone
@@ -652,7 +666,7 @@ where speed matters more than a few leaked citation names.
 ## Evaluation scripts and offline tests
 
 ```bash
-python -m pytest -q tests                      # 23 offline tests, no network/API key (fictional data)
+python -m pytest -q tests                      # 101 offline tests, no network/API key (fictional data)
 python evaluation/consistency_test.py --runs 5 --max-papers 6          # same question x5
 python evaluation/compare_models.py --runs 2 --max-papers 5            # Claude vs Ollama (qwen3)
 python evaluation/calibrate_ranking.py --models "gemma=ollama:embeddinggemma:300m"   # AUC, cut-off, p@5/8/10
@@ -712,13 +726,31 @@ which was dropped).
 Set `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_BASE_URL` in `.env` (self-hosted
 Langfuse, e.g. `http://localhost:3000`, or Langfuse Cloud) and every run becomes one trace:
 
-| Observation | Records |
+Trace name `research-gap-agent-run`, version `research-gap-agent-2.0`, tags `research-gap`,
+`entrypoint:<cli|streamlit|evaluation>`, `backend:<cloud|local>`, `rag:<on|off>`. Observation
+names are the ones in the code (`tracing.NODE_OBSERVATIONS` for the graph nodes, the LLM call's
+`purpose` for generations):
+
+| Observation (type) | Records |
 |---|---|
-| `research_gap_agent` (agent) | redacted topic, final answer (gaps + links), run metrics |
-| `node:<name>` (chain) | each graph node's input keys and output summary |
-| `llm:fast` / `llm:strong` (generation) | system prompt + user prompt, output, token usage, model, temperature; **reasoning** when `OLLAMA_THINK=true` |
-| `llm:tool_turn:<agent>` (generation) | system prompt, conversation so far, tool list → assistant text + tool calls (name, arguments) |
-| `tool:<name>` (tool) | arguments the LLM chose → the exact context returned to it |
+| `run-research-gap-agent` (agent) — root | redacted request (topic, years, max papers, input decision), final answer (gaps with evidence level + counts + paper links), **search scope**, run metrics, knowledge-base stats |
+| `check-input-privacy` (guardrail) | node 0 `sanitize_input` — input recorded as `[withheld: raw user input before redaction]`, output = redacted topic + decision |
+| `plan-search-queries` (chain) | node 1 `generate_keywords` |
+| `search-literature` (chain) | node 2 `search_sources` |
+| `rank-papers` (chain) | node 3 `filter_and_rank` |
+| `check-sufficiency` (chain) | node 4 `check_sufficiency` |
+| `extract-paper-facts` (chain) | node 5 `extract_paper_data` |
+| `compare-papers` (chain) | node 6 `compare_papers` |
+| `propose-and-verify-gaps` (chain) | node 7 `analyze_gaps` |
+| `redact-final-answer` (guardrail) | node 8 `privacy_guard` |
+| `generate-search-queries`, `extract-paper-facts`, `synthesize-trends`, `propose-gaps`, `repair-verifier-answer`, `detect-personal-data` (generation) | one per LLM call: system + user prompt (OpenAI-format messages), output, model, temperature, token usage; **reasoning** when thinking is on |
+| `search-agent`, `verifier-agent` (agent) | the two tool-calling loops: steps, tool calls, whether the step limit was hit |
+| `search-agent-turn`, `verifier-agent-turn` (generation) | one per agent turn: conversation so far → assistant text + `tool_calls` (name, arguments as JSON) |
+| `search-papers`, `get-paper-text`, `search-paper-chunks`, `search-corpus` (retriever) | arguments the LLM chose → the exact context returned to it (siblings of the turn that requested them) |
+| `embed-texts` (embedding), `retrieve-chunks` (retriever) | embedding calls and RAG chunk searches outside a tool call |
+
+Scores on every trace: `gaps-supported`, `quote-verified-rate`, `evidence-coverage`,
+`outbound-pii-violations`.
 
 Nothing is traced when the keys are missing (tracing.py is a no-op), so the agent never depends
 on Langfuse being up.
@@ -779,7 +811,7 @@ problems. What changed, and what was measured:
    and records per-source health — shown on the search card, in the report, and used in (3).
    Placeholder settings (`you@example.com`) are no longer sent. OpenAlex now requires a free API key
    (Feb 2026); the UI warns when keys are missing.
-2. **Relevance cut-off never cut.** `evaluation/calibrate_ranking.py` on 136 hand-labelled
+2. **Relevance cut-off never cut.** `evaluation/calibrate_ranking.py` on 138 hand-labelled
    candidates (2 topics, `evaluation/data/`): ranking order was already good for every model
    (AUC ≈ 0.99; the top 5 and top 8 were all on topic), but the 0.35 cut-off sat below the lowest
    score bge-small ever gave (0.53), so 66/66 candidates "passed". Node 3 now ranks with the RAG
@@ -789,7 +821,8 @@ problems. What changed, and what was measured:
 3. **Overconfident gaps.** A counterexample now counts only if the verifier copies a sentence
    from that paper's text verbatim (checked against what the tools returned); a gap lost to a
    title that "may be relevant" no longer happens. Absence claims are capped below High when the
-   run analysed < 8 papers or < 2 sources answered (`confidence_caps`, shown per gap). In the
+   run analysed < 8 papers or < 2 sources answered (`confidence_caps`, shown per gap; since the
+   evidence levels the same caps keep a gap below Strong). In the
    re-run, a counterexample was accepted on a verified sentence ("…spanning various languages…").
 4. **Slow privacy pass.** Measured instead of assumed — see [Privacy](#privacy-llm-extraction--decision-model):
    skipping the header LLM call leaked names, so it stays on; the deterministic affiliation
@@ -833,11 +866,11 @@ against a gap about multi-modal datasets) — the Dashboard shows the quote so a
 Sidebar → **Page: 📊 Dashboard** reads every saved run in `output/` (`dashboard.py` for the data,
 `dashboard_page.py` for the page) and shows:
 
-- **KPIs** — runs, topics, papers analysed, gaps, supported / refuted, High-confidence count, mean score.
-- **Gaps by category** and **confidence by verdict** charts. The gap proposer now gives every gap one
+- **KPIs** — runs, topics, papers analysed, gaps, supported / refuted, Strong-evidence and Limited-evidence counts.
+- **Gaps by category** and **evidence level by verdict** charts. The gap proposer now gives every gap one
   of 8 categories (`contracts.GAP_CATEGORIES`); runs saved before that get one from keyword rules
   (marked "inferred").
-- **All gaps** table with filters (topic, category, verdict, confidence) and a CSV download.
+- **All gaps** table with filters (topic, category, verdict, evidence level), the evidence counts per gap, and a CSV download.
 - **Gaps refuted by a paper** — the refuting paper with its link (built from metadata) and the
   verbatim sentence the verifier quoted from it.
 - **Gaps that recur across different topics** — near-identical gaps proposed for unrelated topics
