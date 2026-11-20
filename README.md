@@ -6,7 +6,10 @@ more depth, alongside the full architecture writeup).
 
 Given a research topic, this agent searches academic sources, filters to the relevant papers,
 extracts structured facts from each (optionally reading the full PDF, not just the abstract),
-compares them, and proposes evidence-grounded Research Gap candidates with a confidence score.
+compares them, and proposes **Potential Research Gaps** with the evidence behind each one, an evidence
+level (Strong / Moderate / Limited) and the limits of the search that produced them. It does not
+claim to *discover* gaps: everything is proposed from the papers this run found and analysed, which
+is not a systematic literature review, so every gap should be checked by a person.
 
 ## Status
 
@@ -58,7 +61,7 @@ the docx (§1–§9); this is just the map:
 | 4 | `check_sufficiency` | No LLM call — if too few papers passed the threshold, loops back to node 1 with feedback (capped at `MAX_RETRY_LOOPS`) |
 | 5 | `extract_paper_data` | Per paper: fetches the open-access PDF and converts it to Markdown if available (else uses the abstract), then extracts method/dataset/findings/limitations/metrics (LLM, "fast" tier) |
 | 6 | `compare_papers` | Builds a comparison table across all extracted papers, then synthesizes cross-paper trends (LLM, "strong" tier) |
-| 7 | `analyze_gaps` | Proposes 2–4 candidate Research Gaps grounded in the table, drops cited ids that don't exist, then a **verifier agent** reads each cited paper's source text through the `get_paper_text` tool and returns a contract-validated verdict → confidence score |
+| 7 | `analyze_gaps` | Proposes 2–4 Potential Research Gaps grounded in the table, drops cited ids that don't exist, then a **verifier agent** reads each cited paper's source text through the `get_paper_text` tool and returns a contract-validated verdict → confidence score |
 | 8 | `privacy_guard` | Privacy check on the **final answer** (trend summary + gaps): regex + author list + LLM extraction → decision model → redaction |
 
 The "fast" vs "strong" model tiers, the hybrid cloud/local backend, the confidence-scoring

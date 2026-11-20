@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 import dashboard as dash
+import evidence
 from config import CONFIG
 
 STATUS_ORDER = [dash.STATUS_SUPPORTED, dash.STATUS_CONTESTED, dash.STATUS_NOT_SUPPORTED, dash.STATUS_REFUTED,
@@ -30,7 +31,8 @@ def _by_status(df: pd.DataFrame, index: str) -> pd.DataFrame:
 
 
 def render():
-    st.title("📊 Dashboard — research gaps across runs")
+    st.title(f"📊 Dashboard — {evidence.ANSWER_TITLE} across runs")
+    st.caption(evidence.LIMITATION_NOTE)
     runs = dash.load_runs(CONFIG.output_dir)
     if not runs:
         st.info(f"No saved runs in `{CONFIG.output_dir}/` yet - run the agent first.")
@@ -76,7 +78,7 @@ def render():
         st.bar_chart(pivot, height=320, color=[STATUS_COLOR[c] for c in pivot.columns])
 
     # ---- all gaps ----
-    st.subheader(f"All gaps ({len(sel)})")
+    st.subheader(f"All potential research gaps ({len(sel)})")
     table = df.assign(verdict=df["status"].map(lambda x: f"{STATUS_ICON.get(x, '')} {x}"),
                       papers=df["supporting_papers"].map(len),
                       refuted_by=df["counterexample_paper"].map(lambda p: (p or {}).get("title", "")))
@@ -88,7 +90,7 @@ def render():
                                                                                     format="%.0f"),
                                 "confidence_level": "confidence"})
     st.download_button("Download these gaps (.csv)", table.drop(columns=["supporting_papers", "counterexample_paper"])
-                       .to_csv(index=False).encode("utf-8-sig"), "research_gaps.csv", "text/csv")
+                       .to_csv(index=False).encode("utf-8-sig"), "potential_research_gaps.csv", "text/csv")
 
     # ---- refuted gaps, with the paper that refutes them ----
     refuted = [g for g in sel if g["status"] in (dash.STATUS_REFUTED, dash.STATUS_REFUTED_OLD)]
@@ -132,7 +134,7 @@ def render():
         st.write("None found.")
 
     # ---- gap details ----
-    st.subheader("Gap details")
+    st.subheader("Potential research gap details")
     for g in sel:
         with st.expander(f"{STATUS_ICON.get(g['status'], '')} [{g['confidence_level']}] {g['claim'][:140]}"):
             st.markdown(f"**Topic:** {g['topic']} · **Run:** {g['time']} · **Category:** {g['category']}"

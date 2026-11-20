@@ -31,6 +31,7 @@ import time
 import streamlit as st
 
 import embeddings
+import evidence
 import links
 import metrics
 import outbound
@@ -61,7 +62,7 @@ NODE_META = {
     "check_sufficiency": ("✅", "Check if enough papers found"),
     "extract_paper_data": ("📄", "Extract data from each paper"),
     "compare_papers": ("🔬", "Compare papers & synthesize trends"),
-    "analyze_gaps": ("💡", "Propose gaps + verifier agent (tool: get_paper_text)"),
+    "analyze_gaps": ("💡", "Propose potential research gaps + verifier agent (tools: get_paper_text, search_corpus)"),
     "privacy_guard": ("🛡️", "Privacy guard on final answer"),
 }
 # Linear "what runs next" edges. check_sufficiency is conditional (handled specially below) and
@@ -186,8 +187,8 @@ def _summarize_output(node_key: str, update: dict, acc: dict) -> str:
     if node_key == "analyze_gaps":
         gaps = update.get("gap_candidates") or []
         if not gaps:
-            return "No gap candidates survived verification"
-        return "\n".join(f"- {g['claim']} _( {g['confidence_level']}, {g['confidence_score']}/100, "
+            return "No potential research gaps survived verification"
+        return f"**{evidence.ANSWER_TITLE}** (from the analysed papers only):  \n" + "\n".join(f"- {g['claim']} _( {g['confidence_level']}, {g['confidence_score']}/100, "
                          f"verifier read {len(g.get('evidence_read_ids', []))}/{len(g.get('supporting_paper_ids', []))} sources )_"
                          for g in gaps)
     return ""
@@ -597,12 +598,13 @@ elif state:
     st.write(state.get("trend_summary", "_(none)_"))
 
     # ---- FINAL ANSWER ----
-    st.header("✅ Final answer — candidate research gaps")
+    st.header(f"✅ Final answer — {evidence.ANSWER_TITLE}")
+    st.warning(evidence.LIMITATION_NOTE)
     st.caption("Each gap is checked by the verifier agent, which reads the cited papers through the "
                "get_paper_text tool. The context it read is in the tool-call panel below (agent = verifier_agent).")
     gaps = state.get("gap_candidates", [])
     if not gaps:
-        st.info("No gap candidates survived verification — try a broader topic or more papers.")
+        st.info("No potential research gaps survived verification — try a broader topic or more papers.")
     for i, gap in enumerate(gaps, 1):
         with st.container(border=True):
             color = CONFIDENCE_COLOR.get(gap.get("confidence_level"), "gray")

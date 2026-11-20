@@ -125,7 +125,7 @@ class FakeLLM:
         if "Write a short synthesis" in prompt:
             return ("Most papers use prompting or transfer. As Testauthor et al. note, scripts matter. "
                     "Evaluation focuses on F1.")
-        if "Propose 2-4 candidate Research Gaps" in prompt:
+        if "Propose 2-4 Potential Research Gaps" in prompt:
             ids = re.findall(r"\| ((?:arxiv|openalex|semantic_scholar):[0-9.]+) \|", prompt)
             gaps = [{"claim": "Few-shot NER for code-switched low-resource text is unexplored",
                      "supporting_paper_ids": ids[:2] + (["arxiv:9999.99999"] if self.hallucinate_id else []),

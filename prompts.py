@@ -58,8 +58,12 @@ id. Findings marked "(not confirmed in the text)" could not be matched to the pa
 them less, but do not discuss this marker, how the table was built, or any checking process.
 """
 
-GAP_ANALYSIS_PROMPT = """You are identifying research gaps from a literature comparison, to
-help a researcher choose a new research topic to pursue.
+GAP_ANALYSIS_PROMPT = """You are proposing POTENTIAL research gaps from a literature comparison, to
+help a researcher choose a new research topic to pursue. You have seen only the papers in the table
+below - a small sample found by an automated search, not a systematic literature review - so you
+cannot know that something has never been done. Word every claim as a potential gap in THIS set of
+papers (e.g. "X appears under-explored in the analysed papers"), never as a discovered fact
+(avoid "no research exists", "has never been studied").
 
 Topic: {topic}
 Comparison table:
@@ -68,7 +72,7 @@ Comparison table:
 Trend synthesis:
 {trend_summary}
 
-Propose 2-4 candidate Research Gaps: specific, actionable directions that are NOT already
+Propose 2-4 Potential Research Gaps: specific, actionable directions that are NOT already
 covered by the papers above, but are motivated by patterns in them (e.g. a dataset never
 combined with a method, a limitation multiple papers share, an unexplored population/domain).
 

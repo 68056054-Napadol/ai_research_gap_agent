@@ -8,6 +8,7 @@ import datetime
 import json
 import os
 
+import evidence
 import links
 import metrics
 import outbound
@@ -27,10 +28,11 @@ def source_health_md(health: dict) -> str:
 
 def render_report(state: dict) -> str:
     decision = state.get("input_decision") or {}
-    lines = [f"# Research Gap Report: {state['research_topic']}", ""]
+    lines = [f"# {evidence.ANSWER_TITLE} Report: {state['research_topic']}", ""]
     if decision.get("action") == "REJECT":
         return "\n".join(lines + [f"**Input rejected by the decision model (rule {decision.get('rule')}):** "
                                    f"{decision.get('message')}", ""])
+    lines += [f"> {evidence.LIMITATION_NOTE}", ""]
     if decision.get("action") == "PROCEED_REDACTED":
         lines += [f"> Privacy: {decision.get('message')} (decision rule {decision.get('rule')})", ""]
     lines += [
@@ -50,7 +52,7 @@ def render_report(state: dict) -> str:
         lines += ["", f"Langfuse trace: {state['trace_url']}"]
     lines += ["", "## Comparison table", "", state.get("comparison_table", "(none)"), ""]
     lines += ["## Trends across papers", "", state.get("trend_summary", "(none)"), ""]
-    lines += ["## Final answer: candidate Research Gaps", ""]
+    lines += [f"## Final answer: {evidence.ANSWER_TITLE}", "", f"_{evidence.LIMITATION_NOTE}_", ""]
     for i, gap in enumerate(state.get("gap_candidates", []), 1):
         lines += [
             f"### {i}. {gap['claim']}",

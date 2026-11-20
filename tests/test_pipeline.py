@@ -811,3 +811,17 @@ def test_hybrid_thinking_reaches_only_the_chosen_steps_in_a_full_run(offline, mo
     assert thinking == {"propose-gaps", "synthesize-trends"}
     assert {"search-agent", "verifier-agent", "extract-paper-facts"} <= {p for p, t in seen if not t}
     assert state["run_info"]["think_purposes"] == ["propose-gaps", "synthesize-trends"]
+
+
+# ---------------------------------------------------------------------------
+# Teacher feedback: potential (not discovered) gaps, search scope, evidence levels
+# ---------------------------------------------------------------------------
+def test_answer_is_called_potential_research_gaps_with_a_limitation_note(offline):
+    import evidence
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5)
+    report = main.render_report(state)
+    assert report.startswith("# Potential Research Gaps Report:")
+    assert "## Final answer: Potential Research Gaps" in report
+    assert evidence.LIMITATION_NOTE_TH in report and "candidate Research Gaps" not in report
+    gap_prompt = next(p for p in offline.prompts if "Potential Research Gaps" in p and "Comparison table" in p)
+    assert "not a systematic literature review" in gap_prompt
