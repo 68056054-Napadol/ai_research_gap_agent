@@ -40,12 +40,13 @@ def render_report(state: dict) -> str:
     lines += ["## Trends across papers", "", state.get("trend_summary", "(none)"), ""]
     lines += [f"## Final answer: {evidence.ANSWER_TITLE}", "", f"_{evidence.LIMITATION_NOTE}_", ""]
     for i, gap in enumerate(state.get("gap_candidates", []), 1):
+        ev, level, reasons = evidence.evidence_for_saved_gap(gap, state, datetime.date.today().year)
         lines += [
             f"### {i}. {gap['claim']}",
-            f"**Confidence: {gap['confidence_level']}** (score: {gap['confidence_score']}/100) · "
-            f"verifier read {len(gap.get('evidence_read_ids', []))}/{len(gap.get('supporting_paper_ids', []))} "
+            evidence.evidence_line(ev, level),
+            *([f"*Why not {'Moderate' if level == evidence.LIMITED else 'Strong'}:* {'; '.join(reasons)}"] if reasons else []),
+            f"*Verifier:* read {len(gap.get('evidence_read_ids', []))}/{len(gap.get('supporting_paper_ids', []))} "
             f"cited sources via tools · verdict: {gap.get('verifier_decision_reason', '')}",
-            *([f"*Capped below High:* {'; '.join(gap['confidence_caps'])}"] if gap.get("confidence_caps") else []),
             "",
             gap.get("rationale", ""),
             "",

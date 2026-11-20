@@ -47,9 +47,9 @@ def render():
         f_cat = c2.multiselect("Category", sorted({g["category"] for g in gaps}), placeholder="All categories")
         f_status = c3.multiselect("Verdict", [s for s in STATUS_ORDER if any(g["status"] == s for g in gaps)],
                                   placeholder="All verdicts")
-        f_conf = c4.multiselect("Confidence", ["High", "Medium", "Low"], placeholder="All")
+        f_conf = c4.multiselect("Evidence", list(evidence.LEVELS), placeholder="All")
     sel = [g for g in gaps if (not f_topic or g["topic"] in f_topic) and (not f_cat or g["category"] in f_cat)
-           and (not f_status or g["status"] in f_status) and (not f_conf or g["confidence_level"] in f_conf)]
+           and (not f_status or g["status"] in f_status) and (not f_conf or g["evidence_level"] in f_conf)]
     sel_runs = [r for r in runs if not f_topic or r["state"].get("research_topic") in f_topic]
 
     # ---- KPIs ----
@@ -57,7 +57,7 @@ def render():
     k = st.columns(8)
     for col, (label, value) in zip(k, [("Runs", s["runs"]), ("Topics", s["topics"]), ("Papers analysed", s["papers_analyzed"]),
                                        ("Gaps", s["gaps"]), ("✅ Supported", s["supported"]), ("❌ Refuted", s["refuted"]),
-                                       ("High confidence", s["high"]), ("Mean confidence", s["mean_confidence"] or "-")]):
+                                       ("Strong evidence", s["strong"]), ("Limited evidence", s["limited"])]):
         col.metric(label, value)
 
     if not sel:
@@ -72,9 +72,9 @@ def render():
         pivot = _by_status(df, "category")
         st.bar_chart(pivot, horizontal=True, height=320, color=[STATUS_COLOR[c] for c in pivot.columns])
     with c2:
-        st.subheader("Confidence by verdict")
-        pivot = _by_status(df, "confidence_level")
-        pivot = pivot.reindex([x for x in ["High", "Medium", "Low"] if x in pivot.index])
+        st.subheader("Evidence level by verdict")
+        pivot = _by_status(df, "evidence_level")
+        pivot = pivot.reindex([x for x in evidence.LEVELS if x in pivot.index])
         st.bar_chart(pivot, height=320, color=[STATUS_COLOR[c] for c in pivot.columns])
 
     # ---- all gaps ----
@@ -82,14 +82,18 @@ def render():
     table = df.assign(verdict=df["status"].map(lambda x: f"{STATUS_ICON.get(x, '')} {x}"),
                       papers=df["supporting_papers"].map(len),
                       refuted_by=df["counterexample_paper"].map(lambda p: (p or {}).get("title", "")))
-    st.dataframe(table[["time", "topic", "category", "claim", "verdict", "confidence_level", "confidence_score",
-                        "papers", "refuted_by"]],
+    st.caption("Evidence level comes from countable facts only (README \"Evidence levels\"): supporting papers, "
+               "how many were read in full text, contradicting papers with a verified quote, evidence years, and "
+               "whether the verifier read the cited papers. Runs saved before this had only a 0-100 score; their "
+               "level is recomputed from what they stored.")
+    st.dataframe(table[["time", "topic", "category", "claim", "verdict", "evidence_level", "n_supporting",
+                        "n_full_text", "n_contradicting", "evidence_years", "evidence_coverage", "refuted_by"]],
                  hide_index=True, width="stretch",
                  column_config={"claim": st.column_config.TextColumn("gap", width="large"),
-                                "confidence_score": st.column_config.ProgressColumn("score", min_value=0, max_value=100,
-                                                                                    format="%.0f"),
-                                "confidence_level": "confidence"})
-    st.download_button("Download these gaps (.csv)", table.drop(columns=["supporting_papers", "counterexample_paper"])
+                                "evidence_level": "evidence", "n_supporting": "supporting",
+                                "n_full_text": "full text", "n_contradicting": "contradicting",
+                                "evidence_years": "years", "evidence_coverage": "verifier read"})
+    st.download_button("Download these gaps (.csv)", table.drop(columns=["supporting_papers", "counterexample_paper", "evidence"])
                        .to_csv(index=False).encode("utf-8-sig"), "potential_research_gaps.csv", "text/csv")
 
     # ---- refuted gaps, with the paper that refutes them ----
@@ -114,7 +118,7 @@ def render():
     if contested:
         st.subheader(f"⚠️ Possible counterexamples to check ({len(contested)})")
         st.caption("The verifier named a paper that may already do this, but could not quote a sentence that shows it. "
-                   "The gap is kept, capped below High - open the paper and decide.")
+                   "The gap is kept, capped below Strong - open the paper and decide.")
         st.dataframe(pd.DataFrame([{"topic": g["topic"], "gap": g["claim"], "check paper": g["counterexample_id"]}
                                    for g in contested]), hide_index=True, width="stretch",
                      column_config={"gap": st.column_config.TextColumn(width="large")})
@@ -136,15 +140,17 @@ def render():
     # ---- gap details ----
     st.subheader("Potential research gap details")
     for g in sel:
-        with st.expander(f"{STATUS_ICON.get(g['status'], '')} [{g['confidence_level']}] {g['claim'][:140]}"):
+        with st.expander(f"{STATUS_ICON.get(g['status'], '')} [{g['evidence_level']}] {g['claim'][:140]}"):
             st.markdown(f"**Topic:** {g['topic']} · **Run:** {g['time']} · **Category:** {g['category']}"
                         + (" _(inferred by keyword rules - run saved before categories)_" if g["category_source"] == "rules" else ""))
+            st.markdown(evidence.evidence_line(g["evidence"], g["evidence_level"]))
+            if g["evidence_level_reasons"]:
+                st.caption(f"Why not {'Moderate' if g['evidence_level'] == evidence.LIMITED else 'Strong'}: "
+                           + "; ".join(g["evidence_level_reasons"]))
             st.write(g["rationale"])
             st.markdown("**Supporting papers:**  \n" + "  \n".join(f"• {_link(p)}" for p in g["supporting_papers"]))
             if g["counterexample_paper"]:
                 st.markdown(f"**Refuted by:** {_link(g['counterexample_paper'])}")
-            if g["confidence_caps"]:
-                st.caption("Capped below High: " + "; ".join(g["confidence_caps"]))
             st.caption(f"Verdict rule: {g['verdict_reason']}")
 
     # ---- runs ----

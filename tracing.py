@@ -256,7 +256,9 @@ class _RunHandle:
             input={"research_topic": state.get("research_topic"), "year_from": state.get("year_from"),
                    "year_to": state.get("year_to"), "max_papers": state.get("max_papers"),
                    "input_decision": decision.get("action")},
-            output={"final_answer": [{"claim": g["claim"], "confidence": g["confidence_level"],
+            output={"final_answer": [{"claim": g["claim"],
+                                      "evidence_level": g.get("evidence_level", g.get("confidence_level")),
+                                      "evidence": g.get("evidence"),
                                       "verifier_supported": g.get("verifier_supported"),
                                       "supporting_papers": g.get("supporting_papers", [])}
                                      for g in state.get("gap_candidates") or []],

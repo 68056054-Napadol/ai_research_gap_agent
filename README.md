@@ -25,6 +25,7 @@ that tuning is the team's ongoing work (see "What to build next" at the bottom, 
 1. [Architecture, in brief](#architecture-in-brief)
 2. [Node input/output reference](#node-inputoutput-reference)
 3. [Fact-checking](#fact-checking)
+   - [Evidence levels](#evidence-levels-strong--moderate--limited)
 4. [Prerequisites](#prerequisites)
 5. [Installation, step by step](#installation-step-by-step)
 6. [Configuration reference](#configuration-reference)
@@ -114,7 +115,7 @@ pattern, but nodes only touch what they need).
 - Calls: 2 LLM calls per candidate gap, both tier `strong`, both JSON mode:
   1. `GAP_ANALYSIS_PROMPT` (once) → raw candidates: `claim`, `supporting_paper_ids`, `rationale`
   2. `VERIFIER_PROMPT` (once per candidate with ≥ `MIN_SUPPORTING_PAPERS_FOR_GAP` supporting papers) → `supported` (bool), `notes`, `unsupported_aspects` — see [Fact-checking](#fact-checking) just below
-- Writes: `gap_candidates` (list of `GapCandidate` — `claim`, `supporting_paper_ids`, `rationale`, `confidence_score` 0–100, `confidence_level` High/Medium/Low, `verifier_notes`)
+- Writes: `gap_candidates` (list of `GapCandidate` — `claim`, `supporting_paper_ids`, `rationale`, `evidence_level` Strong/Moderate/Limited with its counts in `evidence` (see [Evidence levels](#evidence-levels-strong--moderate--limited)), legacy `confidence_score` 0–100, `verifier_notes`)
 
 ## Fact-checking
 
@@ -188,6 +189,42 @@ summary) and wasn't implemented here, in part because `full_text` isn't reliably
 every paper (only open-access PDFs get fetched — see [Full-text PDF extraction](#full-text-pdf-extraction)),
 so for abstract-only papers it would mostly re-check the abstract against itself. Flagging it as
 the next step if the team wants to strengthen this further before a demo.
+
+## Evidence levels (Strong / Moderate / Limited)
+
+Every Potential Research Gap gets an **evidence level** decided by code from facts anyone can
+count in `output/*_state.json` — never from a number the LLM gives itself. The criteria were
+written down (here and in `config.py`) before looking at results; change them only in
+`config.py` / `.env`, and say so when you report results.
+
+The counts shown under every gap (report, web UI and Dashboard — `evidence.gap_evidence`):
+
+| Count | Where it comes from |
+|---|---|
+| supporting papers | `supporting_paper_ids` that really are among the analysed papers (made-up ids are dropped first) |
+| …of which full text | supporting papers whose extraction read the full text (`paper_extracts[].extraction_confidence == "full_text"`) |
+| contradicting papers | a counterexample the verifier found **and** whose quote was found verbatim in that paper's text (`counterexample_verified`) |
+| evidence years | min–max `year` of the supporting papers |
+| verifier read the sources | `evidence_coverage` = cited papers the verifier actually read through its tools ÷ cited papers |
+
+The rule (`evidence.evidence_level`, first match wins):
+
+| Level | Thai | Condition (defaults) |
+|---|---|---|
+| **Limited** | หลักฐานจำกัด | verifier did not support the claim, **or** ≥ 1 contradicting paper, **or** < `EVIDENCE_MODERATE_MIN_SUPPORTING` (2) supporting papers, **or** verifier read < `EVIDENCE_MODERATE_MIN_COVERAGE` (50 %) of them |
+| **Strong** | หลักฐานมาก | not Limited **and** ≥ `EVIDENCE_STRONG_MIN_SUPPORTING` (3) supporting papers **and** ≥ `EVIDENCE_STRONG_MIN_FULL_TEXT` (2) of them read in full text **and** verifier read ≥ `EVIDENCE_STRONG_MIN_COVERAGE` (100 %) **and** newest supporting paper ≤ `EVIDENCE_STRONG_MAX_AGE_YEARS` (3) years old **and** no cap below |
+| **Moderate** | หลักฐานปานกลาง | everything else |
+
+The ceilings from `nodes._confidence_caps` are kept: when fewer than `HIGH_CONFIDENCE_MIN_PAPERS`
+(8) papers were analysed, when fewer than `HIGH_CONFIDENCE_MIN_SOURCES` (2) sources answered, or
+when the verifier named a counterexample it could not quote, a gap cannot be Strong. Each gap
+also lists the criteria that kept it from the next level up (`evidence_level_reasons`).
+
+The old 0–100 score (evidence 40 + recency 30 + verifier 30) is still computed and stored in
+`confidence_score` so new runs can be compared with old ones, but it is not shown as the answer.
+`confidence_level` now carries the same value as `evidence_level`. For runs saved before evidence
+levels existed (High/Medium/Low only), the Dashboard rebuilds the counts from what those runs
+stored and applies the same rule.
 
 ## Prerequisites
 

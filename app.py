@@ -43,7 +43,6 @@ from main import render_report, run_info
 
 st.set_page_config(page_title="AI Research Assistant Agent", layout="wide")
 
-CONFIDENCE_COLOR = {"High": "green", "Medium": "orange", "Low": "red"}
 LOG_BOX_HEIGHT = 300
 PAPER_BOX_HEIGHT = 180
 
@@ -192,9 +191,12 @@ def _summarize_output(node_key: str, update: dict, acc: dict) -> str:
         gaps = update.get("gap_candidates") or []
         if not gaps:
             return "No potential research gaps survived verification"
-        return f"**{evidence.ANSWER_TITLE}** (from the analysed papers only):  \n" + "\n".join(f"- {g['claim']} _( {g['confidence_level']}, {g['confidence_score']}/100, "
-                         f"verifier read {len(g.get('evidence_read_ids', []))}/{len(g.get('supporting_paper_ids', []))} sources )_"
-                         for g in gaps)
+        return f"**{evidence.ANSWER_TITLE}** (from the analysed papers only):  \n" + "\n".join(
+            f"- {g['claim']} _( evidence {g.get('evidence_level', g.get('confidence_level'))}: "
+            f"{(g.get('evidence') or {}).get('n_supporting', len(g.get('supporting_paper_ids', [])))} supporting, "
+            f"{(g.get('evidence') or {}).get('n_contradicting', 0)} contradicting, "
+            f"verifier read {len(g.get('evidence_read_ids', []))}/{len(g.get('supporting_paper_ids', []))} sources )_"
+            for g in gaps)
     return ""
 
 
@@ -319,7 +321,7 @@ with st.sidebar:
     CONFIG.max_deep_analysis_papers = st.slider(
         "Papers to deep-analyze", min_value=3, max_value=40, value=min(CONFIG.max_deep_analysis_papers, 40),
         help="Each paper adds roughly 45 s on a local 14B model (PDF + extraction + indexing). "
-             f"Gaps can only reach High confidence with >= {CONFIG.high_confidence_min_papers} papers.",
+             f"Gaps can only reach Strong evidence with >= {CONFIG.high_confidence_min_papers} papers.",
     )
     source_options = ["semantic_scholar", "arxiv", "openalex"]
     selected_sources = st.multiselect("Data sources", source_options, default=list(CONFIG.enabled_sources))
@@ -351,7 +353,7 @@ missing_keys = [name for name, key in (("SEMANTIC_SCHOLAR_API_KEY", CONFIG.seman
                                        ("OPENALEX_API_KEY", CONFIG.openalex_api_key)) if not key]
 if missing_keys:
     st.caption("⚠️ No " + " / ".join(missing_keys) + " in .env - those sources may be rate limited, which narrows "
-               "the search (and caps gap confidence below High). Both keys are free; see .env.example.")
+               "the search (and caps gap evidence below Strong). Both keys are free; see .env.example.")
 
 # ---------------------------------------------------------------------------
 # Run in a background thread + live per-node step cards.
@@ -615,13 +617,13 @@ elif state:
         st.info("No potential research gaps survived verification — try a broader topic or more papers.")
     for i, gap in enumerate(gaps, 1):
         with st.container(border=True):
-            color = CONFIDENCE_COLOR.get(gap.get("confidence_level"), "gray")
+            ev, level, reasons = evidence.evidence_for_saved_gap(gap, state, datetime.date.today().year)
+            color = evidence.LEVEL_COLOR.get(level, "gray")
             st.markdown(f"#### {i}. {gap['claim']}")
-            st.markdown(f":{color}[**{gap['confidence_level']} confidence** — {gap['confidence_score']}/100] · "
-                        f"verifier read **{len(gap.get('evidence_read_ids', []))}/{len(gap.get('supporting_paper_ids', []))}** "
-                        f"cited sources via tool")
-            if gap.get("confidence_caps"):
-                st.caption("Capped below High: " + "; ".join(gap["confidence_caps"]))
+            st.markdown(f":{color}[**{level} evidence — {evidence.LEVEL_TH.get(level, level)}**]  \n"
+                        + evidence.evidence_line(ev, level))
+            if reasons:
+                st.caption(f"Why not {'Moderate' if level == evidence.LIMITED else 'Strong'}: " + "; ".join(reasons))
             st.write(gap.get("rationale", ""))
             st.markdown("**Supporting papers** (links built from paper metadata, not written by the AI):  \n"
                         + "  \n".join(f"• {links.markdown_link(sp)}" for sp in gap.get("supporting_papers", [])))

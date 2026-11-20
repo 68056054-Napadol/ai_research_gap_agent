@@ -6,6 +6,9 @@ and the verified quote), runs, papers, and gaps that keep coming back across unr
 Pure functions over the saved state files, so they are tested offline (tests/test_pipeline.py).
 Nothing here calls an LLM. Older runs saved before gaps had a category get one from keyword rules
 (category_source = "rules"); newer runs carry the category the gap proposer chose ("llm").
+Evidence level (Strong / Moderate / Limited, evidence.py): newer runs store it with its counts; runs
+saved before that only have the old 0-100 score + High/Medium/Low, so their counts are rebuilt from
+what they did store and the level is decided by the same criteria (evidence_source = "recomputed").
 """
 import datetime
 import glob
@@ -13,6 +16,7 @@ import json
 import os
 import re
 
+import evidence
 from contracts import GAP_CATEGORIES
 
 # Keyword rules for runs saved before the proposer assigned categories. First match wins.
@@ -56,6 +60,14 @@ def _run_time(path: str, state: dict) -> str:
     if m:
         return datetime.datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").isoformat(timespec="seconds")
     return ""
+
+
+def _run_year(time_iso: str) -> int:
+    """Evidence recency is judged against the year the run happened, not today."""
+    try:
+        return int(str(time_iso)[:4])
+    except ValueError:
+        return datetime.date.today().year
 
 
 def load_runs(output_dir: str) -> list:
@@ -111,10 +123,18 @@ def gap_rows(runs: list) -> list:
                 category = rule_category(g.get("claim"))
             facts = g.get("verifier_facts") or {}
             status = gap_status(g)
+            ev, level, reasons = evidence.evidence_for_saved_gap(g, st, _run_year(run["time"]))
             rows.append({
                 "run_id": run["run_id"], "time": run["time"], "topic": st.get("research_topic", ""),
                 "gap_no": i, "claim": g.get("claim", ""), "category": category, "category_source": source,
-                "status": status, "confidence_level": g.get("confidence_level", ""),
+                "status": status, "evidence_level": level, "evidence": ev, "evidence_level_reasons": reasons,
+                "evidence_source": "stored" if g.get("evidence_level") in evidence.LEVELS else "recomputed",
+                "n_supporting": ev["n_supporting"], "n_full_text": ev["n_supporting_full_text"],
+                "n_contradicting": ev["n_contradicting"],
+                "evidence_years": f"{ev['year_min']}–{ev['year_max']}" if ev["year_min"] is not None else "",
+                "evidence_coverage": ev["evidence_coverage"],
+                # legacy fields (runs before evidence levels): High/Medium/Low + 0-100 score
+                "confidence_level": g.get("confidence_level", ""),
                 "confidence_score": g.get("confidence_score"), "confidence_caps": g.get("confidence_caps") or [],
                 "verdict_reason": g.get("verifier_decision_reason", ""),
                 "rationale": g.get("rationale", ""),
@@ -145,7 +165,7 @@ def run_rows(runs: list) -> list:
             "sources_failed": ", ".join(sorted(s for s, h in health.items() if not h.get("ok"))),
             "gaps": len(gaps), "supported": statuses.count(STATUS_SUPPORTED),
             "refuted": statuses.count(STATUS_REFUTED) + statuses.count(STATUS_REFUTED_OLD),
-            "high": sum(1 for g in gaps if g.get("confidence_level") == "High"),
+            "strong": sum(1 for g in gaps if evidence.evidence_for_saved_gap(g, st, _run_year(run["time"]))[1] == evidence.STRONG),
             "tokens": (m.get("input_tokens") or 0) + (m.get("output_tokens") or 0),
             "redactions": sum(r.get("occurrences", 0) for r in (st.get("privacy_log") or []) if r.get("action") == "REDACT"),
             "trace_url": st.get("trace_url", ""),
@@ -214,7 +234,7 @@ def recurring_gaps(gap_list: list, min_topics: int = 2) -> list:
 
 def summary(gap_list: list, runs: list) -> dict:
     statuses = [g["status"] for g in gap_list]
-    scores = [g["confidence_score"] for g in gap_list if isinstance(g["confidence_score"], (int, float))]
+    levels = [g["evidence_level"] for g in gap_list]
     return {
         "runs": len(runs), "topics": len({r["state"].get("research_topic") for r in runs}),
         "papers_analyzed": sum(len(r["state"].get("paper_extracts") or []) for r in runs),
@@ -222,8 +242,8 @@ def summary(gap_list: list, runs: list) -> dict:
         "refuted": statuses.count(STATUS_REFUTED) + statuses.count(STATUS_REFUTED_OLD),
         "not_supported": statuses.count(STATUS_NOT_SUPPORTED),
         "contested": statuses.count(STATUS_CONTESTED),
-        "high": sum(1 for g in gap_list if g["confidence_level"] == "High"),
-        "mean_confidence": round(sum(scores) / len(scores), 1) if scores else None,
+        "strong": levels.count(evidence.STRONG), "moderate": levels.count(evidence.MODERATE),
+        "limited": levels.count(evidence.LIMITED),
     }
 
 

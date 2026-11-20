@@ -86,3 +86,91 @@ def search_scope_lines(scope: dict) -> list:
         + ("; ".join(f"{s.get('title') or s.get('id')} (`{s.get('id')}`) - {s.get('reason')}" for s in skipped) or "none"),
     ]
     return lines
+
+
+# ---------------------------------------------------------------------------
+# Evidence level: Strong / Moderate / Limited from countable facts only
+# ---------------------------------------------------------------------------
+STRONG, MODERATE, LIMITED = "Strong", "Moderate", "Limited"
+LEVELS = (STRONG, MODERATE, LIMITED)
+LEVEL_TH = {STRONG: "หลักฐานมาก", MODERATE: "หลักฐานปานกลาง", LIMITED: "หลักฐานจำกัด"}
+LEVEL_COLOR = {STRONG: "green", MODERATE: "orange", LIMITED: "red"}
+
+
+def gap_evidence(supporting_ids: list, extracts_by_id: dict, papers_by_id: dict, *, verifier_supported: bool,
+                 counterexample_verified: bool, counterexample_unquoted: bool, coverage: float) -> dict:
+    """The countable facts behind one gap. Every number here can be checked by hand in state.json."""
+    years = [papers_by_id.get(pid, {}).get("year") for pid in supporting_ids]
+    years = [y for y in years if isinstance(y, int)]
+    return {
+        "n_supporting": len(supporting_ids),
+        "n_supporting_full_text": sum(1 for pid in supporting_ids
+                                      if (extracts_by_id.get(pid) or {}).get("extraction_confidence") == "full_text"),
+        "n_supporting_quote_verified": sum(1 for pid in supporting_ids if (extracts_by_id.get(pid) or {}).get("quote_verified")),
+        "n_contradicting": 1 if counterexample_verified else 0,     # counterexample whose quote was verified
+        "n_unquoted_counterexamples": 1 if counterexample_unquoted else 0,
+        "year_min": min(years) if years else None,
+        "year_max": max(years) if years else None,
+        "evidence_coverage": round(float(coverage or 0), 2),       # share of cited papers the verifier read
+        "verifier_supported": bool(verifier_supported),
+    }
+
+
+def evidence_level(ev: dict, caps: list, current_year: int, cfg=None) -> tuple:
+    """(level, reasons). Reasons say which pre-written criterion kept the gap from the next level up."""
+    if cfg is None:
+        from config import CONFIG as cfg
+    limited = []
+    if not ev["verifier_supported"]:
+        limited.append("verifier did not support the claim")
+    if ev["n_contradicting"]:
+        limited.append(f"{ev['n_contradicting']} paper contradicts it (verified quote)")
+    if ev["n_supporting"] < cfg.evidence_moderate_min_supporting:
+        limited.append(f"{ev['n_supporting']} supporting paper(s), Moderate needs >= {cfg.evidence_moderate_min_supporting}")
+    if ev["evidence_coverage"] < cfg.evidence_moderate_min_coverage:
+        limited.append(f"verifier read {ev['evidence_coverage']:.0%} of the cited papers, "
+                       f"Moderate needs >= {cfg.evidence_moderate_min_coverage:.0%}")
+    if limited:
+        return LIMITED, limited
+    short = []
+    if ev["n_supporting"] < cfg.evidence_strong_min_supporting:
+        short.append(f"{ev['n_supporting']} supporting papers, Strong needs >= {cfg.evidence_strong_min_supporting}")
+    if ev["n_supporting_full_text"] < cfg.evidence_strong_min_full_text:
+        short.append(f"{ev['n_supporting_full_text']} supporting paper(s) read in full text, "
+                     f"Strong needs >= {cfg.evidence_strong_min_full_text}")
+    if ev["evidence_coverage"] < cfg.evidence_strong_min_coverage:
+        short.append(f"verifier read {ev['evidence_coverage']:.0%} of the cited papers, "
+                     f"Strong needs >= {cfg.evidence_strong_min_coverage:.0%}")
+    if ev["year_max"] is None or current_year - ev["year_max"] > cfg.evidence_strong_max_age_years:
+        short.append(f"newest supporting paper {ev['year_max'] or 'has no year'}, Strong needs one from the last "
+                     f"{cfg.evidence_strong_max_age_years} years")
+    short += list(caps or [])
+    return (MODERATE, short) if short else (STRONG, [])
+
+
+def evidence_line(ev: dict, level: str) -> str:
+    """One Markdown line of the counts, shown under every gap (report, UI, Dashboard)."""
+    years = (f"{ev['year_min']}–{ev['year_max']}" if ev.get("year_min") is not None else "no year data")
+    return (f"**Evidence: {level}** ({LEVEL_TH.get(level, level)}) · supporting papers **{ev['n_supporting']}** "
+            f"(full text {ev['n_supporting_full_text']}) · contradicting papers (verified quote) "
+            f"**{ev['n_contradicting']}** · evidence years {years} · verifier read the cited papers: "
+            f"{'yes' if ev['evidence_coverage'] >= 1 else 'partly' if ev['evidence_coverage'] > 0 else 'no'} "
+            f"(coverage {ev['evidence_coverage']:.2f})")
+
+
+def evidence_for_saved_gap(g: dict, state: dict, current_year: int, cfg=None) -> tuple:
+    """(evidence, level, reasons) for a gap from a saved run. Runs saved before evidence levels only
+    have the old 0-100 score and High/Medium/Low; the counts are rebuilt from what they did store
+    (supporting ids, paper_extracts, paper years, evidence_coverage, verifier facts)."""
+    if g.get("evidence") and g.get("evidence_level") in LEVELS:
+        return g["evidence"], g["evidence_level"], g.get("evidence_level_reasons") or []
+    facts = g.get("verifier_facts") or {}
+    ev = gap_evidence(g.get("supporting_paper_ids") or [],
+                      {e.get("paper_id"): e for e in state.get("paper_extracts") or []},
+                      {p["id"]: p for p in state.get("selected_papers") or [] if p.get("id")},
+                      verifier_supported=bool(g.get("verifier_supported")),
+                      counterexample_verified=bool(facts.get("counterexample_verified")),
+                      counterexample_unquoted=bool(facts.get("counterexample_found")) and facts.get("counterexample_verified") is False,
+                      coverage=g.get("evidence_coverage") or 0)
+    level, reasons = evidence_level(ev, g.get("confidence_caps") or [], current_year, cfg)
+    return ev, level, reasons

@@ -550,7 +550,8 @@ def test_full_run_with_few_papers_never_reports_high(offline):
     state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5)
     assert state["gap_candidates"]
     for g in state["gap_candidates"]:
-        assert g["confidence_level"] != "High" and g["confidence_caps"]
+        assert g["evidence_level"] != "Strong" and g["confidence_caps"]
+        assert any("only" in r and "papers analysed" in r for r in g["evidence_level_reasons"])
 
 
 def test_trend_summary_names_papers_not_ids(offline):
@@ -773,7 +774,7 @@ def test_verifier_that_reads_nothing_cannot_support_a_gap(offline, monkeypatch):
     for g in state["gap_candidates"]:
         assert g["evidence_coverage"] == 0 and not g["verifier_supported"]
         assert "did not read any cited paper" in g["verifier_decision_reason"]
-        assert g["confidence_level"] != "High"
+        assert g["evidence_level"] == "Limited" and g["evidence"]["evidence_coverage"] == 0
 
 
 def test_thinking_can_be_switched_on_for_chosen_steps_only(monkeypatch):
@@ -867,3 +868,59 @@ def test_trace_output_carries_the_search_scope(traced):
     root = next(s for s in _spans(traced) if s["name"] == "run-research-gap-agent")
     out = root["attrs"]["langfuse.observation.output"]
     assert "search_scope" in out and "queries_searched" in out and "n_full_text" in out and "skipped_papers" in out
+
+
+
+def _ev(**kw):
+    ev = {"n_supporting": 3, "n_supporting_full_text": 2, "n_supporting_quote_verified": 3, "n_contradicting": 0,
+          "n_unquoted_counterexamples": 0, "year_min": 2023, "year_max": 2025, "evidence_coverage": 1.0,
+          "verifier_supported": True}
+    ev.update(kw)
+    return ev
+
+
+@pytest.mark.parametrize("kw,caps,expected", [
+    ({}, [], "Strong"),
+    ({}, ["only 5 papers analysed (Strong needs >= 8)"], "Moderate"),     # old ceiling kept
+    ({"n_supporting": 2}, [], "Moderate"),
+    ({"n_supporting_full_text": 1}, [], "Moderate"),
+    ({"evidence_coverage": 0.5}, [], "Moderate"),
+    ({"year_max": 2020}, [], "Moderate"),
+    ({"year_min": None, "year_max": None}, [], "Moderate"),
+    ({"n_contradicting": 1}, [], "Limited"),
+    ({"verifier_supported": False}, [], "Limited"),
+    ({"n_supporting": 1}, [], "Limited"),
+    ({"evidence_coverage": 0.25}, [], "Limited"),
+])
+def test_evidence_level_follows_the_written_criteria(kw, caps, expected):
+    import evidence
+    level, reasons = evidence.evidence_level(_ev(**kw), caps, 2026, CONFIG)
+    assert level == expected
+    assert (reasons == []) == (expected == "Strong")
+
+
+def test_every_gap_shows_its_countable_evidence(offline):
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5)
+    report = main.render_report(state)
+    by_id = {p["id"]: p for p in state["selected_papers"]}
+    for g in state["gap_candidates"]:
+        ev = g["evidence"]
+        assert g["evidence_level"] in ("Strong", "Moderate", "Limited") and g["confidence_level"] == g["evidence_level"]
+        years = [by_id[pid]["year"] for pid in g["supporting_paper_ids"]]
+        assert ev["n_supporting"] == len(g["supporting_paper_ids"]) and (ev["year_min"], ev["year_max"]) == (min(years), max(years))
+        assert ev["n_supporting_full_text"] == 0          # fetch_full_text is off in the offline fixture
+        assert isinstance(g["confidence_score"], float)     # legacy score still in state
+    assert "**Evidence: " in report and "contradicting papers (verified quote)" in report
+    assert "/100" not in report                              # score not shown as the main answer
+
+
+def test_dashboard_recomputes_evidence_level_for_runs_saved_before_it(tmp_path):
+    import dashboard
+    old = _gap("An old run's gap with only a High/75 score", category="Other")
+    old["evidence_coverage"] = 1.0
+    papers = [{"id": "arxiv:1", "year": 2024}, {"id": "arxiv:2", "year": 2025}]
+    _saved_state(tmp_path, "20261119_100000", "old topic", [old], papers)
+    row = dashboard.gap_rows(dashboard.load_runs(str(tmp_path)))[0]
+    assert row["evidence_source"] == "recomputed" and row["confidence_level"] == "High"
+    assert row["evidence_level"] == "Moderate"           # 2 supporting papers < Strong's 3
+    assert row["n_supporting"] == 2 and row["evidence_years"] == "2024–2025" and row["n_contradicting"] == 0

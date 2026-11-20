@@ -10,6 +10,7 @@ import re
 import time
 
 import embeddings
+import evidence
 import links
 import llm_client
 import metrics
@@ -512,11 +513,12 @@ CONFIDENCE_CAP_SCORE = 70.0   # just below the High band (>= 75)
 
 
 def _confidence_caps(state: dict) -> list:
-    """Reasons the search behind this run was too narrow to call an absence claim 'High'."""
+    """Reasons the search behind this run was too narrow to call an absence claim 'Strong'
+    (evidence.evidence_level) - and to give the legacy score more than CONFIDENCE_CAP_SCORE."""
     caps = []
     n_analyzed = len(state.get("paper_extracts") or [])
     if n_analyzed < CONFIG.high_confidence_min_papers:
-        caps.append(f"only {n_analyzed} papers analysed (High needs >= {CONFIG.high_confidence_min_papers})")
+        caps.append(f"only {n_analyzed} papers analysed (Strong needs >= {CONFIG.high_confidence_min_papers})")
     health = state.get("source_health")
     if health:   # empty = no source went through sources/net.py (offline fakes) - nothing to judge
         answered = sorted(s for s, h in health.items() if h.get("ok", 0) > 0)
@@ -524,7 +526,7 @@ def _confidence_caps(state: dict) -> list:
             failed = sorted(s for s, h in health.items() if h.get("ok", 0) == 0)
             caps.append(f"papers came from {', '.join(answered) or 'no source'} only"
                         + (f" ({', '.join(failed)} did not answer)" if failed else "")
-                        + f" - High needs >= {CONFIG.high_confidence_min_sources} sources")
+                        + f" - Strong needs >= {CONFIG.high_confidence_min_sources} sources")
     return caps
 
 
@@ -587,8 +589,8 @@ def analyze_gaps(state: AgentState) -> dict:
             verdict["supported"] = False
             verdict["decision_reason"] = "verifier did not read any cited paper (its notes claim otherwise) - unverified"
 
-        # --- confidence scoring formula (architecture doc §7.3) ---
-        # TODO(Member C): first-pass heuristic - calibrate with evaluation/eval_plan.md §4.
+        # --- legacy 0-100 score (architecture doc §7.3) - kept in state for comparison with older
+        # runs, NOT shown as the main answer: the evidence level below replaces it.
         evidence_count_score = min(len(supporting_ids) / 4, 1.0) * 40       # up to 40 pts
 
         cited_years = [papers_by_id.get(pid, {}).get("year") for pid in supporting_ids]
@@ -610,22 +612,34 @@ def analyze_gaps(state: AgentState) -> dict:
         caps = _confidence_caps(state)
         if verdict.get("counterexample_found") and not verdict.get("counterexample_verified"):
             # not enough to refute the gap, but not nothing either: a live run had 3 of 4 gaps where
-            # the verifier pointed at a paper it could not quote - keep the gap, flag it, no High
+            # the verifier pointed at a paper it could not quote - keep the gap, flag it, no Strong
             caps = caps + [f"verifier named a possible counterexample ({verdict.get('counterexample_paper_id') or 'no id'}) "
                            "but could not quote it - check that paper"]
         if caps and confidence_score > CONFIDENCE_CAP_SCORE:
             confidence_score = CONFIDENCE_CAP_SCORE
-        confidence_level = "High" if confidence_score >= 75 else "Medium" if confidence_score >= 45 else "Low"
-        logger.info("    -> verdict supported=%s, read %d/%d sources, confidence=%s (%.1f/100)",
-                    verdict.get("supported"), len(read_ids), len(supporting_ids), confidence_level, confidence_score)
+
+        # --- evidence level: Strong / Moderate / Limited from countable facts (config.py, README
+        # "Evidence levels"); the same caps keep a gap below Strong as they kept it below High.
+        ev = evidence.gap_evidence(
+            supporting_ids, extracts_by_id, papers_by_id, verifier_supported=bool(verdict.get("supported")),
+            counterexample_verified=bool(verdict.get("counterexample_verified")),
+            counterexample_unquoted=bool(verdict.get("counterexample_found")) and not verdict.get("counterexample_verified"),
+            coverage=coverage)
+        level, level_reasons = evidence.evidence_level(ev, caps, current_year)
+        logger.info("    -> verdict supported=%s, read %d/%d sources, evidence=%s (%d supporting, %d full text, "
+                    "%d contradicting)", verdict.get("supported"), len(read_ids), len(supporting_ids), level,
+                    ev["n_supporting"], ev["n_supporting_full_text"], ev["n_contradicting"])
 
         verified.append({
             "claim": gap["claim"],
             "supporting_paper_ids": supporting_ids,
             "supporting_papers": links.supporting_papers(supporting_ids, papers_by_id),
             "rationale": gap.get("rationale", ""),
-            "confidence_score": round(confidence_score, 1),
-            "confidence_level": confidence_level,
+            "evidence_level": level,                 # Strong | Moderate | Limited - the level shown to the user
+            "evidence": ev,                          # the countable facts it was decided from
+            "evidence_level_reasons": level_reasons, # which criterion kept it from the next level up
+            "confidence_level": level,               # same value, for readers of older field names
+            "confidence_score": round(confidence_score, 1),   # legacy 0-100 score, state only
             "confidence_caps": caps,
             "category": gap.get("category") or "Other",
             # the paper that refutes the gap, with a link from metadata - only when its quote was verified
@@ -645,7 +659,7 @@ def analyze_gaps(state: AgentState) -> dict:
 
     caps = _confidence_caps(state)
     if caps:
-        logger.info("Confidence capped below High for this run: %s", "; ".join(caps))
+        logger.info("Evidence capped below Strong for this run: %s", "; ".join(caps))
     # what a person reads names papers; the ids stay in supporting_paper_ids / supporting_papers
     labels = state.get("paper_labels") or paper_labels(state["selected_papers"])
     for g in verified:

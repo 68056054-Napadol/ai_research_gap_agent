@@ -43,8 +43,12 @@ class GapCandidate(TypedDict, total=False):
     supporting_paper_ids: list
     supporting_papers: list    # [{id, title, year, url}] - links.supporting_papers, only real analyzed papers
     rationale: str
-    confidence_level: str      # "Low" | "Medium" | "High"
-    confidence_score: float    # 0-100, see nodes.analyze_gaps
+    evidence_level: str        # "Strong" | "Moderate" | "Limited" - evidence.evidence_level, from countable facts
+    evidence: dict             # evidence.gap_evidence: n_supporting, n_supporting_full_text, n_contradicting,
+                               # year_min/year_max, evidence_coverage, verifier_supported
+    evidence_level_reasons: list  # which pre-written criterion kept the gap from the next level up
+    confidence_level: str      # same value as evidence_level (runs before Nov 2026: "Low" | "Medium" | "High")
+    confidence_score: float    # legacy 0-100 score (nodes.analyze_gaps) - kept for comparison, not shown
     verifier_notes: str
     unsupported_aspects: str
     evidence_read_ids: list    # cited papers the verifier actually read via get_paper_text

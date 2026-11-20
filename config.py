@@ -170,6 +170,24 @@ class Config:
     high_confidence_min_papers: int = _int("HIGH_CONFIDENCE_MIN_PAPERS", 8)
     high_confidence_min_sources: int = _int("HIGH_CONFIDENCE_MIN_SOURCES", 2)
 
+    # --- Evidence level of a potential gap (README "Evidence levels") ---
+    # Written down before looking at results, and only COUNTABLE facts: how many analysed papers
+    # support the gap, how many of those were read in full text, whether a paper contradicts it
+    # (a counterexample whose quote was verified in that paper's text), how recent the evidence is,
+    # and whether the verifier actually read the cited papers. No number the LLM gives itself.
+    # Limited  = verifier did not support it, OR >= 1 contradicting paper, OR fewer than
+    #            EVIDENCE_MODERATE_MIN_SUPPORTING supporting papers, OR verifier read less than
+    #            EVIDENCE_MODERATE_MIN_COVERAGE of them
+    # Strong   = not Limited AND every EVIDENCE_STRONG_* threshold met AND no confidence cap
+    #            (nodes._confidence_caps: narrow search / unquoted counterexample)
+    # Moderate = everything else
+    evidence_strong_min_supporting: int = _int("EVIDENCE_STRONG_MIN_SUPPORTING", 3)
+    evidence_strong_min_full_text: int = _int("EVIDENCE_STRONG_MIN_FULL_TEXT", 2)
+    evidence_strong_min_coverage: float = _float("EVIDENCE_STRONG_MIN_COVERAGE", 1.0)
+    evidence_strong_max_age_years: int = _int("EVIDENCE_STRONG_MAX_AGE_YEARS", 3)   # age of the NEWEST supporting paper
+    evidence_moderate_min_supporting: int = _int("EVIDENCE_MODERATE_MIN_SUPPORTING", 2)
+    evidence_moderate_min_coverage: float = _float("EVIDENCE_MODERATE_MIN_COVERAGE", 0.5)
+
     # --- Output ---
     output_dir: str = "output"
 
