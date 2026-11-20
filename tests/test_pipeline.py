@@ -52,6 +52,7 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(CONFIG, "ollama_think_purposes", frozenset())
     monkeypatch.setattr(CONFIG, "high_confidence_min_sources", 2)
     monkeypatch.setattr(CONFIG, "tracing_enabled", True)
+    monkeypatch.setattr(CONFIG, "max_run_tokens", 0)
     return fake
 
 
@@ -963,3 +964,18 @@ def test_gaps_show_only_verified_evidence_sentences(offline, monkeypatch):
     assert "Evidence sentences" in report
     assert seen_none and evidence.NO_VERIFIED_QUOTE in report
     assert evidence.quote_lines([{"id": "a:1", "title": "T", "year": 2024, "quote": None}]) == [f"- T (2024): _{evidence.NO_VERIFIED_QUOTE}_"]
+
+
+def test_token_budget_stops_retry_and_verifier(offline, monkeypatch):
+    import nodes
+    monkeypatch.setattr(CONFIG, "max_run_tokens", 0)
+    monkeypatch.setattr(nodes, "_run_tokens", lambda: 10 ** 9)
+    assert not nodes.token_budget_used_up()                       # 0 = no limit
+    assert nodes.route_after_sufficiency({"sufficient": False, "retry_count": 0}) == "retry"
+    monkeypatch.setattr(CONFIG, "max_run_tokens", 1000)
+    assert nodes.route_after_sufficiency({"sufficient": False, "retry_count": 0, "selected_papers": []}) == "extract"
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5)
+    assert state["gap_candidates"]
+    for g in state["gap_candidates"]:
+        assert "MAX_RUN_TOKENS" in g["verifier_decision_reason"] and g["evidence_level"] == "Limited"
+    assert not any(t["agent"] == "verifier_agent" for t in state["tool_trace"])

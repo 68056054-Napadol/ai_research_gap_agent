@@ -196,9 +196,23 @@ def check_sufficiency(state: AgentState) -> dict:
     return {"sufficient": sufficient, "retry_count": retry_count + (0 if sufficient else 1)}
 
 
+def _run_tokens() -> float:
+    return metrics.get("input_tokens") + metrics.get("output_tokens")
+
+
+def token_budget_used_up() -> bool:
+    """MAX_RUN_TOKENS stop condition (0 = off) - see README "Decision rules and stop conditions"."""
+    return CONFIG.max_run_tokens > 0 and _run_tokens() >= CONFIG.max_run_tokens
+
+
 def route_after_sufficiency(state: AgentState) -> str:
     """Conditional-edge function passed to graph.add_conditional_edges (see graph.py)."""
     if state.get("sufficient"):
+        return "extract"
+    if token_budget_used_up():
+        metrics.inc("token_budget_stopped_retry")
+        logger.warning("Token budget MAX_RUN_TOKENS=%d used up (%d tokens) - no retry loop; proceeding with %d papers.",
+                       CONFIG.max_run_tokens, _run_tokens(), len(state.get("selected_papers", [])))
         return "extract"
     if state.get("retry_count", 0) >= CONFIG.max_retry_loops:
         logger.warning("Hit max retry loops (%d) with only %d papers; proceeding anyway.",
@@ -572,19 +586,28 @@ def analyze_gaps(state: AgentState) -> dict:
                         i, len(raw_candidates), len(supporting_ids), CONFIG.min_supporting_papers_for_gap, claim_preview)
             continue  # structural rule from architecture doc §7.3 — reject weakly-evidenced gaps
 
-        logger.info("  [%d/%d] Verifying with tools (%d supporting papers): %r",
-                    i, len(raw_candidates), len(supporting_ids), claim_preview)
-        try:
-            verdict, vtrace, read_ids, corpus_searches = _verify_with_tools(
-                gap, supporting_ids, extracts_by_id, state["selected_papers"])
-            for t in vtrace:
-                t["gap_index"] = i
-            trace += vtrace
-        except llm_client.LLMError as e:
-            logger.warning("  [%d/%d] Verifier failed, treating as unsupported: %s", i, len(raw_candidates), e)
-            verdict = {"supported": False, "notes": "verifier call failed", "unsupported_aspects": "unknown",
-                       "decision_reason": "verifier call failed"}
+        if token_budget_used_up():
+            metrics.inc("token_budget_skipped_verifier")
+            logger.warning("  [%d/%d] Token budget MAX_RUN_TOKENS=%d used up - gap kept but NOT verified: %r",
+                           i, len(raw_candidates), CONFIG.max_run_tokens, claim_preview)
+            verdict = {"supported": False, "notes": "not verified: run token budget used up",
+                       "unsupported_aspects": "unknown",
+                       "decision_reason": f"token budget MAX_RUN_TOKENS={CONFIG.max_run_tokens} used up - not verified"}
             read_ids, corpus_searches = [], []
+        else:
+            logger.info("  [%d/%d] Verifying with tools (%d supporting papers): %r",
+                        i, len(raw_candidates), len(supporting_ids), claim_preview)
+            try:
+                verdict, vtrace, read_ids, corpus_searches = _verify_with_tools(
+                    gap, supporting_ids, extracts_by_id, state["selected_papers"])
+                for t in vtrace:
+                    t["gap_index"] = i
+                trace += vtrace
+            except llm_client.LLMError as e:
+                logger.warning("  [%d/%d] Verifier failed, treating as unsupported: %s", i, len(raw_candidates), e)
+                verdict = {"supported": False, "notes": "verifier call failed", "unsupported_aspects": "unknown",
+                           "decision_reason": "verifier call failed"}
+                read_ids, corpus_searches = [], []
         coverage = len([r for r in read_ids if r in supporting_ids]) / len(supporting_ids)
         if coverage == 0 and verdict.get("supported"):
             # live run with thinking on: the verifier made no tool call at all, yet its notes said

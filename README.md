@@ -26,6 +26,7 @@ that tuning is the team's ongoing work (see "What to build next" at the bottom, 
 2. [Node input/output reference](#node-inputoutput-reference)
 3. [Fact-checking](#fact-checking)
    - [Evidence levels](#evidence-levels-strong--moderate--limited)
+   - [Decision rules and stop conditions](#decision-rules-and-stop-conditions)
 4. [Prerequisites](#prerequisites)
 5. [Installation, step by step](#installation-step-by-step)
 6. [Configuration reference](#configuration-reference)
@@ -225,6 +226,39 @@ The old 0–100 score (evidence 40 + recency 30 + verifier 30) is still computed
 `confidence_level` now carries the same value as `evidence_level`. For runs saved before evidence
 levels existed (High/Medium/Low only), the Dashboard rebuilds the counts from what those runs
 stored and applies the same rule.
+
+## Decision rules and stop conditions
+
+Every branch, cut-off and stop in a run is a rule in code, not an LLM decision. All of them, in
+the order a run meets them (defaults in brackets; change them in `.env`, see `config.py`):
+
+| # | Where | Rule | What happens |
+|---|---|---|---|
+| 1 | `nodes.route_after_input` (after node 0) | decision model `input_action`: fewer than 2 content words left after redaction (rule I1) | **REJECT → END**, nothing is searched. Otherwise PROCEED / PROCEED_REDACTED (I2–I4) |
+| 2 | search agent (node 2), `tools.SearchToolContext` | at most `MAX_SEARCH_TOOL_CALLS` [10] `search_papers` calls per search round; arguments must pass `contracts.SearchPapersArgs`; only enabled sources; years clamped to the user's range | over budget → the tool answers "budget used up, give your final summary"; a bad argument comes back to the LLM as a tool error |
+| 3 | every tool loop, `llm_client.run_tool_loop` | at most `MAX_TOOL_STEPS` [8] LLM turns per agent | after the last step the LLM is asked for a final answer with tools switched off |
+| 4 | node 2 | the model made **no** successful tool call | harness fallback: the planned queries are run through the same tool, labelled `harness_fallback` in the trace |
+| 5 | `sources/net.py` | HTTP 429/5xx retried up to `SOURCE_MAX_RETRIES` [3] (Retry-After honoured, ≤ `SOURCE_RETRY_MAX_WAIT` s); `SOURCE_DISABLE_AFTER_FAILURES` [3] consecutive failures | the source is switched off for the rest of the run and reported in *Search scope* |
+| 6 | `sources/arxiv.py` | strict AND query returns < 5 results (`MIN_STRICT_RESULTS`) and has more than 3 content words | one relaxed query |
+| 7 | node 2 | candidates accumulate across retry loops, deduplicated | capped at `MAX_CANDIDATE_PAPERS` [80] |
+| 8 | node 3, `embeddings.filter_by_threshold` | similarity cut-off per ranking model (`embeddings.RANKING_THRESHOLDS`: embeddinggemma 0.50, bge-small-en 0.78, else 0.50; `SIMILARITY_THRESHOLD` overrides); title-only papers get 0.05 slack | below the cut-off → dropped; the top `--max-papers` / `MAX_DEEP_ANALYSIS_PAPERS` [8] above it are selected |
+| 9 | node 4, `check_sufficiency` | `selected ≥ min(MIN_PAPERS_BEFORE_RETRY [5], max_papers)` | sufficient → extraction |
+| 10 | `route_after_sufficiency` | insufficient **and** `retry_count < MAX_RETRY_LOOPS` [3] **and** token budget left | **retry**: back to node 1 with the queries already tried (`RETRY_CONTEXT_TEMPLATE` asks for broader / adjacent terms) |
+| 11 | `route_after_sufficiency` | insufficient but `retry_count ≥ MAX_RETRY_LOOPS`, or `MAX_RUN_TOKENS` used up | **stop retrying**, extract whatever was selected |
+| 12 | node 5 | paper has neither an abstract nor full text, or its extraction call fails | paper skipped, recorded in `skipped_papers` and shown in *Search scope* |
+| 13 | node 5, `_quote_verified` | extraction's `supporting_quote` not found verbatim in the text shown | extract kept, `quote_verified=False`; its sentence is not shown as evidence |
+| 14 | node 7 | cited ids not among the analysed papers | dropped (`dropped_ids`) before any rule below |
+| 15 | node 7 | fewer than `MIN_SUPPORTING_PAPERS_FOR_GAP` (2, `config.py`) valid supporting papers | gap **rejected** |
+| 16 | node 7, `MAX_RUN_TOKENS` [0 = off] | run's input + output tokens ≥ budget | remaining gaps are kept but **not verified** (evidence Limited) |
+| 17 | node 7, `verifier_decision` (first match) | cited papers not relevant → not supported · counterexample named but not among the passages the tools returned, or quote < 30 chars / not verbatim → ignored (gap kept, flagged, no Strong) · verified counterexample → **refuted** · overstated → not supported · else supported | the LLM reports facts; this code decides |
+| 18 | node 7 | verifier read none of the cited papers | not supported, whatever its notes say |
+| 19 | node 7, `evidence.evidence_level` | see [Evidence levels](#evidence-levels-strong--moderate--limited), incl. the `_confidence_caps` ceiling | Strong / Moderate / Limited |
+| 20 | graph | LangGraph `recursion_limit` 60 | hard stop against an endless loop (rules 10/11 end the loop long before) |
+
+**When the results are too broad** (many papers, mostly loosely related) the system does *not*
+keep rewriting queries: there is no "too many results" loop. Breadth is handled by the similarity
+cut-off (rule 8) and the `max_papers` budget, which keep only the most similar papers, and by
+`MAX_CANDIDATE_PAPERS` (rule 7). Only *too few* papers triggers a retry (rules 9–11).
 
 ## Prerequisites
 

@@ -148,6 +148,10 @@ class Config:
     # --- Sufficiency-check retry loop (architecture doc §2.2, Node 4) ---
     min_papers_before_retry: int = _int("MIN_PAPERS_BEFORE_RETRY", 5)
     max_retry_loops: int = _int("MAX_RETRY_LOOPS", 3)
+    # Token budget for one run (input + output tokens, metrics.py). 0 = no limit. Once used up, the
+    # optional, repeatable work stops: no further retry loop (Node 4) and no further verifier runs
+    # (Node 7 - the remaining gaps are kept but marked unverified, so their evidence is Limited).
+    max_run_tokens: int = _int("MAX_RUN_TOKENS", 0)
 
     # --- Relevance ranking (architecture doc §7.2) ---
     embedding_model_name: str = "BAAI/bge-small-en-v1.5"
