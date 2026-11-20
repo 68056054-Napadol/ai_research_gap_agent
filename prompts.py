@@ -29,7 +29,8 @@ Title: {title}
 Year: {year}
 Text: {text}
 
-Return ONLY a JSON object, no other text:
+Return ONLY a JSON object, no other text. Each value below describes what to write - replace it
+with your answer taken from the Text; never copy the description itself:
 
 {{
   "problem": "the research problem or question the paper addresses, 1 sentence, or 'not stated'",

@@ -57,6 +57,31 @@ class PaperExtractOutput(BaseModel):
             raise ValueError("must not be blank (use 'not stated' if the text has no answer)")
         return v.strip()
 
+    @model_validator(mode="after")
+    def _not_the_instructions(self):
+        # Live run (qwen3:14b, after the "problem" field was added): 4 of 8 extractions returned the
+        # prompt's own field descriptions as values ("the approach/technique used, 1-2 sentences").
+        # Treated as a contract violation, so call_json re-asks with this error.
+        echoed = [f for f, start in EXTRACT_FIELD_DESCRIPTIONS.items()
+                  if (getattr(self, f) or "").strip().lower().startswith(start)]
+        if echoed:
+            raise ValueError(f"{', '.join(echoed)}: copied the instruction text from the JSON template instead of "
+                             "answering from the paper - write the actual answer, or 'not stated'")
+        return self
+
+
+# The start of each field's description in prompts.EXTRACT_PROMPT (lower case) - an answer that
+# begins with one of these is the template echoed back, not an extraction.
+EXTRACT_FIELD_DESCRIPTIONS = {
+    "problem": "the research problem or question the paper addresses",
+    "method": "the approach/technique used",
+    "dataset": "dataset(s) used, or",
+    "key_findings": "main result(s), 1-2 sentences",
+    "limitations_stated": "limitations the authors themselves mention",
+    "metrics": "evaluation metrics reported, or",
+    "supporting_quote": "a short quote (under 40 words) copied exactly",
+}
+
 
 # What kind of gap it is - used by the Dashboard to group gaps across runs. The model picks one;
 # anything else it writes is mapped to the closest label (or "Other") instead of failing the call.

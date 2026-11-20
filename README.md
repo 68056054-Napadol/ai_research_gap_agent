@@ -485,7 +485,7 @@ to its abstract, same as before this feature existed — this never aborts a run
 
 ## Testing and verifying your setup
 
-Run `python -m pytest -q tests` first: 101 offline tests (fictional fake papers + a scripted LLM,
+Run `python -m pytest -q tests` first: 102 offline tests (fictional fake papers + a scripted LLM,
 no network or API key) covering tool calling, contracts, the decision model and privacy. Beyond
 that, "testing" means two things: **confirming your install works**, and **judging whether the
 agent's actual output is good**.
@@ -666,7 +666,7 @@ where speed matters more than a few leaked citation names.
 ## Evaluation scripts and offline tests
 
 ```bash
-python -m pytest -q tests                      # 101 offline tests, no network/API key (fictional data)
+python -m pytest -q tests                      # 102 offline tests, no network/API key (fictional data)
 python evaluation/consistency_test.py --runs 5 --max-papers 6          # same question x5
 python evaluation/compare_models.py --runs 2 --max-papers 5            # Claude vs Ollama (qwen3)
 python evaluation/calibrate_ranking.py --models "gemma=ollama:embeddinggemma:300m"   # AUC, cut-off, p@5/8/10

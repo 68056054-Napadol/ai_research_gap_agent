@@ -1112,3 +1112,24 @@ def test_readme_matches_the_code():
         n_defs = sum(1 for line in f if line.startswith("def test_"))
     counts = {int(n) for n in re.findall(r"(\d+) offline tests", readme)}
     assert counts and all(n >= n_defs for n in counts), (counts, n_defs)   # parametrized tests count more than once
+
+
+def test_extraction_that_copies_the_template_is_re_asked(offline, monkeypatch):
+    """Live run (qwen3:14b): 4 of 8 extractions returned the prompt's own field descriptions."""
+    from contracts import EXTRACT_FIELD_DESCRIPTIONS, PaperExtractOutput
+    with pytest.raises(Exception):
+        PaperExtractOutput(problem="the research problem or question the paper addresses, 1 sentence",
+                           method="the approach/technique used, 1-2 sentences", key_findings="k")
+    real, echoed = offline.call, {"n": 0}
+
+    def echo_once(prompt, *a, **k):
+        if "Extract structured information" in prompt and echoed["n"] == 0:
+            echoed["n"] += 1
+            return json.dumps({f: d + ", 1-2 sentences" for f, d in EXTRACT_FIELD_DESCRIPTIONS.items()})
+        return real(prompt, *a, **k)
+    monkeypatch.setattr(llm_client, "_call_anthropic", echo_once)
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5)
+    assert echoed["n"] == 1 and len(state["paper_extracts"]) == 5
+    for e in state["paper_extracts"]:
+        assert not any(str(e.get(f, "")).lower().startswith(d) for f, d in EXTRACT_FIELD_DESCRIPTIONS.items())
+    assert state["run_metrics"].get("json_calls_needed_retry", 0) >= 1
