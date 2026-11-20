@@ -979,3 +979,38 @@ def test_token_budget_stops_retry_and_verifier(offline, monkeypatch):
     for g in state["gap_candidates"]:
         assert "MAX_RUN_TOKENS" in g["verifier_decision_reason"] and g["evidence_level"] == "Limited"
     assert not any(t["agent"] == "verifier_agent" for t in state["tool_trace"])
+
+
+def test_api_keys_never_reach_the_run_log(caplog):
+    """Live run: the UI's Full run log (and its download) showed httpx's
+    'HTTP Request: GET https://api.openalex.org/works?...&api_key=...' lines in full."""
+    import logging
+    import queue
+    import logging_utils
+    q = queue.Queue()
+    handler = logging_utils.QueueLogHandler(q)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    prev = root.level
+    root.setLevel(logging.INFO)
+    logging_utils.quiet_noisy_third_party_loggers()
+    try:
+        logging.getLogger("httpx").info('HTTP Request: %s %s "%s %d %s"', "GET",
+                                        "https://api.openalex.org/works?search=x&api_key=SECRETKEY123&per-page=25",
+                                        "HTTP/1.1", 200, "OK")
+        logging.getLogger("nodes").info("calling %s", "https://x.org/?token=tok_abc&mailto=me@uni.ac.th")
+        logging.getLogger("nodes").warning("key sk-ant-api03-ABCDEFGHIJKLMNOP leaked?")
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(prev)
+    lines = "\n".join(q.get_nowait() for _ in range(q.qsize()))
+    assert "SECRETKEY123" not in lines and "tok_abc" not in lines and "me@uni.ac.th" not in lines
+    assert "sk-ant-api03" not in lines
+    assert "api_key=***&per-page=25" in lines and "search=x" in lines      # the rest of the URL stays readable
+    assert logging_utils.mask_secrets("https://a.org/w?api_key=***") == "https://a.org/w?api_key=***"
+
+
+def test_outbound_contract_masks_api_keys():
+    import outbound
+    out = outbound.enforce({"error": "Client error '403' for url 'https://api.openalex.org/works?api_key=K3Y&x=1'"}, "test")
+    assert "K3Y" not in out["error"] and "api_key=***" in out["error"]

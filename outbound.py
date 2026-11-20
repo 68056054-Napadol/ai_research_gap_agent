@@ -20,6 +20,7 @@ import logging
 
 import metrics
 import privacy
+from logging_utils import mask_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +39,20 @@ def violations(obj) -> list:
     return found
 
 
+def _mask_secrets(obj):
+    """API keys / tokens in URLs (an httpx error message in a tool result, say) never leave either."""
+    if isinstance(obj, str):
+        return mask_secrets(obj)
+    if isinstance(obj, dict):
+        return {k: _mask_secrets(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_mask_secrets(v) for v in obj]
+    return obj
+
+
 def enforce(obj, where: str):
     """Return obj with any PII redacted; count + log (masked) if anything had to be fixed."""
+    obj = _mask_secrets(obj)
     found = violations(obj)
     if not found:
         return obj
