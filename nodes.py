@@ -149,6 +149,7 @@ def search_sources(state: AgentState) -> dict:
             logger.warning("Source %s returned nothing usable this run: %s", src, h["last_error"] or "no response")
     return {
         "candidate_papers": merged,
+        "enabled_sources": list(ctx.enabled_sources),
         "source_health": health,
         "search_summary": result.final_text.strip(),
         "search_used_fallback": used_fallback,
@@ -254,6 +255,7 @@ def extract_paper_data(state: AgentState) -> dict:
     logger.info("Extracting structured data (method/dataset/results) from %d papers", total)
     store = rag_store.get_store() if CONFIG.rag_enabled else None
     extracts = []
+    skipped = []   # papers selected for analysis that produced no extract - shown in "Search scope"
     privacy_records = []
     for i, paper in enumerate(state["selected_papers"], 1):
         title = (paper.get("title") or "")[:80]
@@ -296,6 +298,7 @@ def extract_paper_data(state: AgentState) -> dict:
         text = full_text or paper.get("abstract", "")
         if not text:
             logger.info("  [%d/%d] SKIPPED (no abstract or text available): %s", i, total, title)
+            skipped.append({"id": paper["id"], "title": paper.get("title", ""), "reason": "no abstract or full text available"})
             continue
 
         # Index into the knowledge base (abstract-only papers too, so search_corpus covers them).
@@ -325,6 +328,8 @@ def extract_paper_data(state: AgentState) -> dict:
             except llm_client.LLMError as e:
                 logger.warning("  [%d/%d] Extraction FAILED for %s (%.1fs): %s",
                                 i, total, paper["id"], time.monotonic() - paper_start, e)
+                skipped.append({"id": paper["id"], "title": paper.get("title", ""),
+                                "reason": f"extraction failed ({type(e).__name__})"})
                 continue
             if store is not None:
                 store.put_extract(paper["id"], cache_key, result)
@@ -354,7 +359,7 @@ def extract_paper_data(state: AgentState) -> dict:
         logger.info("  [%d/%d] Done (%.1fs): %s", i, total, time.monotonic() - paper_start, title)
 
     logger.info("Extraction complete: %d/%d papers successfully extracted", len(extracts), total)
-    out = {"paper_extracts": extracts, "selected_papers": state["selected_papers"],
+    out = {"paper_extracts": extracts, "skipped_papers": skipped, "selected_papers": state["selected_papers"],
            "privacy_log": (state.get("privacy_log") or []) + privacy_records}
     if store is not None:
         out["knowledge_base"] = store.stats()

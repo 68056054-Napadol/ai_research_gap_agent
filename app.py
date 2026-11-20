@@ -179,7 +179,11 @@ def _summarize_output(node_key: str, update: dict, acc: dict) -> str:
         return "Not enough papers yet — retrying with broader keywords"
     if node_key == "extract_paper_data":
         n = len(update.get("paper_extracts") or [])
-        return f"Successfully extracted structured data from **{n}** papers"
+        skipped = update.get("skipped_papers") or []
+        n_full = sum(1 for e in update.get("paper_extracts") or [] if e.get("extraction_confidence") == "full_text")
+        return (f"Successfully extracted structured data from **{n}** papers ({n_full} full text, {n - n_full} abstract only)"
+                + (f" · **{len(skipped)}** skipped: " + "; ".join(f"{(p.get('title') or p['id'])[:60]} ({p['reason']})"
+                                                         for p in skipped) if skipped else ""))
     if node_key == "compare_papers":
         trend = update.get("trend_summary") or ""
         preview = trend[:280] + ("…" if len(trend) > 280 else "")
@@ -583,6 +587,10 @@ elif state:
 
     if state.get("trace_url"):
         st.info(f"🔭 Langfuse trace of this run: {state['trace_url']}")
+    st.subheader("🔎 Search scope (ขอบเขตการค้น)")
+    st.caption("How wide the search behind the answer was - a gap is only as convincing as this search.")
+    st.markdown("\n".join(evidence.search_scope_lines(evidence.search_scope(state))))
+
     papers = state.get("selected_papers", [])
     st.subheader(f"Papers analyzed ({len(papers)} of {len(state.get('candidate_papers', []))} found)")
     for p in papers:

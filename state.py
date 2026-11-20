@@ -72,6 +72,7 @@ class AgentState(TypedDict, total=False):
     search_summary: str         # the search agent's own final message
     search_used_fallback: bool  # True if the model made no tool calls and the harness searched for it
     source_health: dict         # per source: ok/failed/retries/rate_limited/disabled/last_error (sources/net.py)
+    enabled_sources: list       # sources the search agent was allowed to use this run (sidebar / CONFIG)
 
     # --- Node 3 ---
     ranked_papers: list         # list[Paper], sorted by similarity_score desc
@@ -84,6 +85,8 @@ class AgentState(TypedDict, total=False):
     # --- Node 5 ---
     paper_extracts: list        # list[PaperExtract]
     knowledge_base: dict        # rag_store stats after this run (papers, chunks, cached extracts)
+    skipped_papers: list        # [{id, title, reason}] selected papers that produced no extract
+                                 # (no abstract/full text, or the extraction call failed)
 
     # --- Node 6 ---
     comparison_table: str       # markdown table, built from paper_extracts

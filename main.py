@@ -18,14 +18,6 @@ from graph import build_graph
 from logging_utils import configure_console_logging
 
 
-def source_health_md(health: dict) -> str:
-    parts = []
-    for src, h in sorted(health.items()):
-        parts.append(f"{src}: answered" + (f" ({h['retries']} retries)" if h.get("retries") else "")
-                     if h.get("ok") else f"{src}: no results - {h.get('last_error') or 'no answer'}")
-    return "Sources: " + "; ".join(parts)
-
-
 def render_report(state: dict) -> str:
     decision = state.get("input_decision") or {}
     lines = [f"# {evidence.ANSWER_TITLE} Report: {state['research_topic']}", ""]
@@ -35,14 +27,8 @@ def render_report(state: dict) -> str:
     lines += [f"> {evidence.LIMITATION_NOTE}", ""]
     if decision.get("action") == "PROCEED_REDACTED":
         lines += [f"> Privacy: {decision.get('message')} (decision rule {decision.get('rule')})", ""]
-    lines += [
-        f"Papers analyzed: {len(state.get('selected_papers', []))} "
-        f"(from {len(state.get('candidate_papers', []))} candidates found)",
-        "",
-        *([source_health_md(state["source_health"]), ""] if state.get("source_health") else []),
-        "## Papers analyzed",
-        "",
-    ]
+    lines += ["## Search scope (ขอบเขตการค้น)", "", *evidence.search_scope_lines(evidence.search_scope(state)), "",
+              "## Papers analyzed", ""]
     for p in state.get("selected_papers", []):
         # author names are deliberately not shown (privacy.scrub_paper) - only the count
         title = links.markdown_link({"title": p.get("title"), "year": p.get("year"), "url": p.get("url") or links.paper_url(p)})

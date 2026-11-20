@@ -825,3 +825,45 @@ def test_answer_is_called_potential_research_gaps_with_a_limitation_note(offline
     assert evidence.LIMITATION_NOTE_TH in report and "candidate Research Gaps" not in report
     gap_prompt = next(p for p in offline.prompts if "Potential Research Gaps" in p and "Comparison table" in p)
     assert "not a systematic literature review" in gap_prompt
+
+
+def test_search_scope_is_reported_with_skipped_papers(offline, monkeypatch):
+    import evidence
+    import sources as src
+    real_search = src.REGISTRY["arxiv"].search_papers
+
+    def with_empty_paper(query, year_from=None, year_to=None, limit=30):
+        # a paper with no abstract that still ranks (title shares every topic word) -> must be skipped
+        out = real_search(query, year_from, year_to, limit)
+        return out + [{"id": "arxiv:0000.00099", "source": "arxiv", "abstract": "", "year": 2024, "authors": [],
+                       "title": "few-shot named entity recognition in low-resource languages", "doi": None,
+                       "oa_pdf_url": None, "citation_count": 0}]
+    monkeypatch.setattr(src.REGISTRY["arxiv"], "search_papers", with_empty_paper)
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 6)
+    assert {"id": "arxiv:0000.00099", "title": "few-shot named entity recognition in low-resource languages",
+            "reason": "no abstract or full text available"} in state["skipped_papers"]
+    scope = evidence.search_scope(state)
+    assert scope["enabled_sources"] == ["semantic_scholar", "arxiv", "openalex"]
+    assert scope["year_from"] == 2020 and scope["year_to"] == 2026
+    assert "few-shot NER low-resource" in scope["queries_searched"] and scope["queries_planned"]
+    assert scope["n_analyzed"] == scope["n_full_text"] + scope["n_abstract_only"] == len(state["paper_extracts"])
+    assert scope["n_candidates"] >= scope["n_passed_cutoff"] >= scope["n_selected"] >= scope["n_analyzed"]
+    report = main.render_report(state)
+    assert "## Search scope" in report and "arxiv:0000.00099" in report and "from abstract only" in report
+
+
+def test_search_scope_names_sources_that_failed():
+    import evidence
+    scope = evidence.search_scope({"source_health": {"arxiv": {"ok": 3}, "semantic_scholar": {"ok": 0, "last_error": "HTTP 403"}},
+                                   "enabled_sources": ["arxiv", "semantic_scholar"], "year_from": 2021})
+    assert scope["sources_answered"] == ["arxiv"]
+    assert scope["sources_failed"] == [{"source": "semantic_scholar", "error": "HTTP 403"}]
+    text = "\n".join(evidence.search_scope_lines(scope))
+    assert "semantic_scholar (HTTP 403)" in text and "2021–any" in text
+
+
+def test_trace_output_carries_the_search_scope(traced):
+    main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5)
+    root = next(s for s in _spans(traced) if s["name"] == "run-research-gap-agent")
+    out = root["attrs"]["langfuse.observation.output"]
+    assert "search_scope" in out and "queries_searched" in out and "n_full_text" in out and "skipped_papers" in out

@@ -27,6 +27,7 @@ import json
 import logging
 import os
 
+import evidence
 from config import CONFIG
 
 logger = logging.getLogger(__name__)
@@ -259,7 +260,8 @@ class _RunHandle:
                                       "verifier_supported": g.get("verifier_supported"),
                                       "supporting_papers": g.get("supporting_papers", [])}
                                      for g in state.get("gap_candidates") or []],
-                    "input_rejected": decision.get("action") == "REJECT"},
+                    "input_rejected": decision.get("action") == "REJECT",
+                    "search_scope": evidence.search_scope(state) if decision.get("action") != "REJECT" else None},
             metadata={"run_metrics": state.get("run_metrics"), "knowledge_base": state.get("knowledge_base")},
         )
         gaps = state.get("gap_candidates") or []
