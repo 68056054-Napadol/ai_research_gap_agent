@@ -42,6 +42,7 @@ class KeywordOutput(BaseModel):
 
 
 class PaperExtractOutput(BaseModel):
+    problem: str = "not stated"       # the research problem / question the paper addresses
     method: str
     dataset: str = "not stated"
     key_findings: str

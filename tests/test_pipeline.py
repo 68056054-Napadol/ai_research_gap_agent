@@ -924,3 +924,17 @@ def test_dashboard_recomputes_evidence_level_for_runs_saved_before_it(tmp_path):
     assert row["evidence_source"] == "recomputed" and row["confidence_level"] == "High"
     assert row["evidence_level"] == "Moderate"           # 2 supporting papers < Strong's 3
     assert row["n_supporting"] == 2 and row["evidence_years"] == "2024–2025" and row["n_contradicting"] == 0
+
+
+def test_problem_is_extracted_and_shown_in_the_comparison_table(offline):
+    from contracts import PaperExtractOutput
+    assert PaperExtractOutput(method="m", key_findings="k").problem == "not stated"   # old cached extracts still load
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5)
+    assert all(e["problem"] == "few-shot NER in low-resource languages" for e in state["paper_extracts"])
+    header = state["comparison_table"].splitlines()[0]
+    assert header.startswith("| Paper | Year | Problem | Method |")
+    assert "few-shot NER in low-resource languages" in state["comparison_table"]
+    extract_prompt = next(p for p in offline.prompts if "Extract structured information" in p)
+    assert '"problem"' in extract_prompt
+    import nodes
+    assert nodes._cell(None) == "not stated" and nodes._cell("a | b\nc") == "a / b c"

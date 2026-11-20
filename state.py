@@ -25,6 +25,7 @@ class Paper(TypedDict, total=False):
 
 class PaperExtract(TypedDict, total=False):
     paper_id: str
+    problem: str                # research problem / question the paper addresses
     method: str
     dataset: str
     key_findings: str

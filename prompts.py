@@ -32,6 +32,7 @@ Text: {text}
 Return ONLY a JSON object, no other text:
 
 {{
+  "problem": "the research problem or question the paper addresses, 1 sentence, or 'not stated'",
   "method": "the approach/technique used, 1-2 sentences",
   "dataset": "dataset(s) used, or 'not stated'",
   "key_findings": "main result(s), 1-2 sentences",
@@ -47,7 +48,7 @@ Here is a structured comparison table extracted from each paper:
 {comparison_table}
 
 Write a short synthesis (3-5 paragraphs) covering:
-1. Common approaches/methods across these papers, and where they diverge.
+1. The problems the papers address, and the common approaches/methods, and where they diverge.
 2. Common datasets used, and any notable gaps in dataset coverage.
 3. Trends in results/findings over time (if the papers span multiple years).
 4. Any explicit disagreements or contradictions between papers.

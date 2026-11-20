@@ -398,15 +398,20 @@ def replace_ids_with_labels(text: str, labels: dict) -> str:
     return text
 
 
+def _cell(value) -> str:
+    """A table cell: extractions cached before the 'problem' field existed have none."""
+    return " ".join(str(value or "not stated").split()).replace("|", "/")
+
+
 def compare_papers(state: AgentState) -> dict:
     logger.info("Building comparison table from %d extracted papers", len(state["paper_extracts"]))
     by_id = {p["id"]: p for p in state["selected_papers"]}
     labels = paper_labels([by_id[ex["paper_id"]] for ex in state["paper_extracts"] if ex["paper_id"] in by_id])
     # Two views of the same rows: the id table is for gap analysis (gaps must cite ids) and the UI;
     # the trend synthesis gets short names, so the summary a person reads names papers, not ids.
-    rows = ["| Paper | Year | Method | Dataset | Key findings | Quote verified |",
-            "|---|---|---|---|---|---|"]
-    named = ["| Paper | Method | Dataset | Key findings |", "|---|---|---|---|"]
+    rows = ["| Paper | Year | Problem | Method | Dataset | Key findings | Quote verified |",
+            "|---|---|---|---|---|---|---|"]
+    named = ["| Paper | Problem | Method | Dataset | Key findings |", "|---|---|---|---|---|"]
     for ex in state["paper_extracts"]:
         p = by_id.get(ex["paper_id"], {})
         # "Quote verified" = extraction-quote grounding (README "Fact-checking"): whether the
@@ -414,11 +419,11 @@ def compare_papers(state: AgentState) -> dict:
         # source text (Node 5).
         quote_flag = "✅ yes" if ex.get("quote_verified") else "⚠️ no"
         rows.append(
-            f"| {ex['paper_id']} | {p.get('year', '?')} | {ex.get('method', '')} "
+            f"| {ex['paper_id']} | {p.get('year', '?')} | {_cell(ex.get('problem'))} | {ex.get('method', '')} "
             f"| {ex.get('dataset', '')} | {ex.get('key_findings', '')} | {quote_flag} |"
         )
         findings = ex.get("key_findings", "") + ("" if ex.get("quote_verified") else " (not confirmed in the text)")
-        named.append(f"| {labels.get(ex['paper_id'], ex['paper_id'])} | {ex.get('method', '')} "
+        named.append(f"| {labels.get(ex['paper_id'], ex['paper_id'])} | {_cell(ex.get('problem'))} | {ex.get('method', '')} "
                      f"| {ex.get('dataset', '')} | {findings} |")
     table = "\n".join(rows)
 

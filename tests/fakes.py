@@ -119,7 +119,7 @@ class FakeLLM:
         if "Extract structured information from this paper" in prompt:
             text = prompt.split("Text:", 1)[1]
             quote = " ".join(text.split()[:12])
-            return json.dumps({"method": "prompt-based / transfer method", "dataset": "multilingual NER benchmark",
+            return json.dumps({"problem": "few-shot NER in low-resource languages", "method": "prompt-based / transfer method", "dataset": "multilingual NER benchmark",
                                "key_findings": "improves few-shot NER", "limitations_stated": "few languages",
                                "metrics": "F1", "supporting_quote": quote})
         if "Write a short synthesis" in prompt:

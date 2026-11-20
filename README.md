@@ -60,7 +60,7 @@ the docx (§1–§9); this is just the map:
 | 2 | `search_sources` | **Search agent**: the LLM calls the `search_papers` tool (query, source, year range, limit) as many times as it decides, sees each result, adapts; candidates accumulate across retry loops |
 | 3 | `filter_and_rank` | Ranks candidates by embedding cosine-similarity to the topic; keeps the top N above a threshold |
 | 4 | `check_sufficiency` | No LLM call — if too few papers passed the threshold, loops back to node 1 with feedback (capped at `MAX_RETRY_LOOPS`) |
-| 5 | `extract_paper_data` | Per paper: fetches the open-access PDF and converts it to Markdown if available (else uses the abstract), then extracts method/dataset/findings/limitations/metrics (LLM, "fast" tier) |
+| 5 | `extract_paper_data` | Per paper: fetches the open-access PDF and converts it to Markdown if available (else uses the abstract), then extracts problem/method/dataset/findings/limitations/metrics (LLM, "fast" tier) |
 | 6 | `compare_papers` | Builds a comparison table across all extracted papers, then synthesizes cross-paper trends (LLM, "strong" tier) |
 | 7 | `analyze_gaps` | Proposes 2–4 Potential Research Gaps grounded in the table, drops cited ids that don't exist, then a **verifier agent** reads each cited paper's source text through the `get_paper_text` tool and returns a contract-validated verdict → confidence score |
 | 8 | `privacy_guard` | Privacy check on the **final answer** (trend summary + gaps): regex + author list + LLM extraction → decision model → redaction |
@@ -102,7 +102,7 @@ pattern, but nodes only touch what they need).
 - Reads: `selected_papers` (each paper's `abstract`, `oa_pdf_url`, and `full_text` if already fetched on an earlier attempt)
 - Side effect: may fetch + cache a PDF via `pdf_extract.fetch_and_convert` and write the result onto `paper["full_text"]` in place — see [Full-text PDF extraction](#full-text-pdf-extraction)
 - Calls: 1 LLM call per paper, `EXTRACT_PROMPT`, tier `fast`, JSON mode — text truncated to 12,000 chars if full-text was fetched, 4,000 chars if only the abstract is available
-- Writes: `paper_extracts` (list of `PaperExtract` — `paper_id`, `method`, `dataset`, `key_findings`, `limitations_stated`, `metrics`, `extraction_confidence` = `"full_text"` or `"abstract_only"`, `supporting_quote`, `quote_verified`)
+- Writes: `paper_extracts` (list of `PaperExtract` — `paper_id`, `problem`, `method`, `dataset`, `key_findings`, `limitations_stated`, `metrics`, `extraction_confidence` = `"full_text"` or `"abstract_only"`, `supporting_quote`, `quote_verified`)
 - Also runs `_quote_verified()` (`nodes.py`, no LLM call) on each extraction's `supporting_quote` against the exact text the model was shown — see [Fact-checking](#fact-checking)
 
 **6. `compare_papers`**
