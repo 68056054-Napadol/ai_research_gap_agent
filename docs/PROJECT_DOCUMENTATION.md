@@ -2,45 +2,47 @@
 
 2026-11-20
 
-ทุกข้อมูลในเอกสารนี้อ้างอิงจากโค้ดในโฟลเดอร์ D:\NLP_mini_project\ai_research_gap_agent และจากการรันแอปจริง
+ทุกข้อมูลในเอกสารนี้อ้างอิงจากโค้ดในโฟลเดอร์ D:\NLP_mini_project\ai_research_gap_agent (branch `main` ที่ commit `801553a`) และจากการรันแอปจริง ฉบับนี้อัปเดตหลังปรับระบบตาม feedback ของอาจารย์ (ดูหัวข้อ 9)
 
 ## 1. ภาพรวมโปรเจกต์
 
-ระบบนี้คือ AI agent ที่รับหัวข้อวิจัย 1 หัวข้อ แล้วคืน "Research Gap" 2–4 ข้อ ที่อ้างอิงเปเปอร์จริงพร้อมคะแนนความมั่นใจ 0–100 ตาม README.md: ค้นแหล่งวิชาการ → คัดเปเปอร์ที่เกี่ยวข้อง → สกัดข้อเท็จจริงจากแต่ละเปเปอร์ (อ่าน PDF ฉบับเต็มได้) → เปรียบเทียบ → เสนอ gap → ตรวจสอบ gap กับต้นฉบับ
+ระบบนี้คือ AI agent ที่รับหัวข้อวิจัย 1 หัวข้อ แล้วเสนอ "Potential Research Gaps" 2–4 ข้อจากหลักฐานในชุด paper ที่ระบบค้นและวิเคราะห์ได้ เพื่อให้ผู้ใช้ตรวจสอบต่อ ไม่ใช่การทบทวนวรรณกรรมอย่างเป็นระบบ (`evidence.LIMITATION_NOTE`, evidence.py:14-18) แต่ละ gap มีระดับหลักฐาน มาก/ปานกลาง/จำกัด ที่คำนวณจากค่าที่นับได้ ขั้นตอนคือ ค้นแหล่งวิชาการ → คัด paper ที่เกี่ยวข้อง → สกัด Problem/Method/Dataset/Findings (อ่าน PDF ฉบับเต็มได้) → เปรียบเทียบ → เสนอ gap → ตรวจ gap กับต้นฉบับ
 
 | หัวข้อ            | รายละเอียด                                                                                   | แหล่งอ้างอิง                                                              |
 |-----------------|---------------------------------------------------------------------------------------------|------------------------------------------------------------------------|
-| Input           | หัวข้อวิจัย, ช่วงปี (year_from/year_to), จำนวนเปเปอร์ที่วิเคราะห์เชิงลึก                                 | main.py:114 `run()`, แฟล็ก `--topic --year-from --year-to --max-papers` |
-| Output          | รายงาน Markdown `output/<timestamp>_report.md` + state JSON `output/<timestamp>_state.json` | main.py:144 `save_outputs()`                                           |
+| Input           | หัวข้อวิจัย, ช่วงปี (year_from/year_to), จำนวนเปเปอร์ที่วิเคราะห์เชิงลึก                                 | main.py:106 `run()`, แฟล็ก `--topic --year-from --year-to --max-papers` |
+| Output          | รายงาน Markdown `output/<timestamp>_report.md` + state JSON `output/<timestamp>_state.json` | main.py:136 `save_outputs()`                                           |
 | แหล่งเปเปอร์      | Semantic Scholar, arXiv, OpenAlex (+ PDF open-access)                                       | sources/semantic_scholar.py, arxiv.py, openalex.py, pdf_extract.py     |
 | Orchestration   | LangGraph `StateGraph` 9 nodes                                                              | graph.py                                                               |
 | LLM             | 2 backend: cloud (Anthropic) / local (Ollama) แบ่งเป็น tier fast/strong                       | llm_client.py, .env.example                                            |
 | ค่าที่ใช้จริงในเครื่อง | `LLM_BACKEND=local`, qwen3:14b ทั้ง fast และ strong, Langfuse ที่ `http://localhost:3000`       | .env (บรรทัด 2, 74), output/20261119_210348_state.json `run_info`       |
-| UI              | Streamlit 2 หน้า: Run agent และ Dashboard                                                    | app.py:269, dashboard_page.py                                          |
+| UI              | Streamlit 2 หน้า: Run agent และ Dashboard                                                    | app.py:276, dashboard_page.py                                          |
 | Observability   | Langfuse (optional, ปิดอัตโนมัติถ้าไม่มี key)                                                      | tracing.py, outbound.py                                                |
 
 ไลบรารีหลักจาก requirements.txt: langgraph\>=0.2.0, langchain-core, anthropic\>=0.40.0, httpx, sentence-transformers\>=3.0.0, numpy, pydantic\>=2.8.0, mcp\>=1.0.0, tenacity, streamlit\>=1.50.0, pymupdf4llm==0.0.17, pytest, langfuse\>=3.0.0
 
 โครงสร้างไฟล์หลัก (จำนวนบรรทัดจาก `wc -l`):
 
-| ไฟล์                              | บรรทัด     | หน้าที่                                |
-|----------------------------------|-----------|-------------------------------------|
-| nodes.py                         | 690       | 9 graph nodes                       |
-| app.py                           | 678       | Streamlit web UI                    |
-| llm_client.py                    | 570       | LLM wrapper + tool-calling loop     |
-| privacy.py                       | 423       | detector + redaction                |
-| tracing.py                       | 363       | Langfuse tracing                    |
-| tools.py                         | 308       | tool spec + executor                |
-| dashboard.py / dashboard_page.py | 234 / 170 | หน้า Dashboard                       |
-| rag_store.py                     | 227       | RAG knowledge base (SQLite + numpy) |
-| embeddings.py                    | 188       | embedding + ranking                 |
-| prompts.py                       | 184       | prompt ทุกตัว                         |
-| main.py                          | 183       | CLI entrypoint                      |
-| config.py                        | 177       | ค่า config ทั้งหมด                     |
-| contracts.py                     | 167       | pydantic contracts                  |
-| state.py                         | 106       | `AgentState` schema                 |
-| outbound.py                      | 68        | outbound PII contract               |
-| graph.py                         | 57        | ต่อ node เป็น graph                   |
+| ไฟล์                              | บรรทัด     | หน้าที่                                            |
+|----------------------------------|-----------|-------------------------------------------------|
+| nodes.py                         | 749       | 9 graph nodes                                   |
+| app.py                           | 692       | Streamlit web UI                                |
+| llm_client.py                    | 570       | LLM wrapper + tool-calling loop                 |
+| privacy.py                       | 423       | detector + redaction                            |
+| tracing.py                       | 367       | Langfuse tracing                                |
+| tools.py                         | 308       | tool spec + executor                            |
+| dashboard.py / dashboard_page.py | 255 / 179 | หน้า Dashboard                                   |
+| rag_store.py                     | 227       | RAG knowledge base (SQLite + numpy)             |
+| evidence.py                      | 207       | Search scope, ระดับหลักฐาน, ประโยคหลักฐาน (ไฟล์ใหม่) |
+| config.py                        | 199       | ค่า config ทั้งหมด รวมเกณฑ์ระดับหลักฐาน               |
+| contracts.py                     | 193       | pydantic contracts                              |
+| prompts.py                       | 190       | prompt ทุกตัว                                     |
+| embeddings.py                    | 188       | embedding + ranking                             |
+| main.py                          | 175       | CLI entrypoint + รายงาน Markdown                |
+| state.py                         | 117       | `AgentState` schema                             |
+| logging_utils.py                 | 105       | logging + ตัวซ่อน API key                         |
+| outbound.py                      | 81        | outbound PII contract                           |
+| graph.py                         | 57        | ต่อ node เป็น graph                               |
 
 ## 2. สถาปัตยกรรม (LangGraph)
 
@@ -72,23 +74,23 @@ def build_graph():
     return graph.compile()
 ```
 
-State ที่ไหลผ่าน graph คือ `AgentState` (TypedDict, state.py:56) ประกอบด้วย `Paper` (state.py:11), `PaperExtract` (state.py:26) และ `GapCandidate` (state.py:41) แต่ละ node รับ state ทั้งก้อนแต่คืนเฉพาะ key ที่เปลี่ยน (dict) ตามแบบมาตรฐานของ LangGraph
+State ที่ไหลผ่าน graph คือ `AgentState` (TypedDict, state.py:62) ประกอบด้วย `Paper` (state.py:11), `PaperExtract` (state.py:26) และ `GapCandidate` (state.py:42) แต่ละ node รับ state ทั้งก้อนแต่คืนเฉพาะ key ที่เปลี่ยน (dict) ตามแบบมาตรฐานของ LangGraph
 
 ## 3. รายละเอียดแต่ละ node (nodes.py)
 
 ทุก node อยู่ใน nodes.py ตารางนี้บอกบรรทัดที่ฟังก์ชันเริ่ม สิ่งที่ทำ และ key ที่เขียนกลับเข้า state
 
-| \#  | ฟังก์ชัน (บรรทัด)              | สิ่งที่ทำ                                                                                                                                                             | เขียนลง state                                                   |
-|-----|----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------|
-| 0   | `sanitize_input` (54)      | ตรวจหัวข้อที่พิมพ์ด้วย `privacy.sanitize_topic()` → decision model ตัดสิน PROCEED / PROCEED_REDACTED / REJECT; `route_after_input` (76) ส่งไป END ถ้า REJECT                 | `research_topic` (ฉบับ redact), `input_decision`, `privacy_log` |
-| 1   | `generate_keywords` (83)   | LLM tier fast + `KeywordOutput` contract สร้าง 3–5 query; ตอน retry ต่อ `RETRY_CONTEXT_TEMPLATE` เพื่อเลี่ยง query เดิม                                                  | `search_queries`, `prior_queries_tried`                        |
-| 2   | `search_sources` (108)     | search agent: LLM เรียก tool `search_papers` ผ่าน `llm_client.run_tool_loop`; ผลทุกชิ้นผ่าน `privacy.scrub_paper`                                                       | `candidate_papers`, `search_summary`, `tool_trace`             |
-| 3   | `filter_and_rank` (163)    | จัดอันดับด้วย cosine similarity (`embeddings.rank_by_similarity`) ตัดด้วย threshold ต่อโมเดล แล้วเลือก top `max_papers`                                                    | `ranked_papers`, `selected_papers`                             |
-| 4   | `check_sufficiency` (185)  | กฎเดียว ไม่ใช้ LLM: `need = min(MIN_PAPERS_BEFORE_RETRY, max_papers)`; `route_after_sufficiency` (197) ตัดสิน retry/extract                                            | `sufficient`, `retry_count`                                    |
-| 5   | `extract_paper_data` (252) | ดึง PDF open-access → Markdown (ถ้ามี) แล้ว LLM tier fast สกัด method/dataset/findings/limitations/metrics + `supporting_quote`; ตรวจ quote ด้วย `_quote_verified` (40) | `paper_extracts`                                               |
-| 6   | `compare_papers` (395)     | สร้างตารางเปรียบเทียบจาก extract แล้ว LLM tier strong สังเคราะห์แนวโน้ม                                                                                                  | `comparison_table`, `trend_summary`                            |
-| 7   | `analyze_gaps` (526)       | เสนอ gap (`GAP_ANALYSIS_PROMPT`), ตัด id ที่ไม่มีจริง, บังคับ ≥ 2 เปเปอร์, แล้วส่ง verifier agent (`_verify_with_tools`, 464) อ่านต้นฉบับผ่าน tool                               | `gap_candidates`, `tool_trace`                                 |
-| 8   | `privacy_guard` (657)      | ตรวจคำตอบสุดท้าย (trend summary + gaps) ด้วย detector + decision model แล้ว redact                                                                                    | ฟิลด์คำตอบที่ redact แล้ว                                           |
+| \#  | ฟังก์ชัน (บรรทัด)              | สิ่งที่ทำ                                                                                                                                                                                                                                          | เขียนลง state                                                    |
+|-----|----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------|
+| 0   | `sanitize_input` (55)      | ตรวจหัวข้อที่พิมพ์ด้วย `privacy.sanitize_topic()` → decision model ตัดสิน PROCEED / PROCEED_REDACTED / REJECT; `route_after_input` (77) ส่งไป END ถ้า REJECT                                                                                              | `research_topic` (ฉบับ redact), `input_decision`, `privacy_log`  |
+| 1   | `generate_keywords` (84)   | LLM tier fast + `KeywordOutput` contract สร้าง 3–5 query; ตอน retry ต่อ `RETRY_CONTEXT_TEMPLATE` เพื่อเลี่ยง query เดิม                                                                                                                               | `search_queries`, `prior_queries_tried`                         |
+| 2   | `search_sources` (112)     | search agent: LLM เรียก tool `search_papers` ผ่าน `llm_client.run_tool_loop`; ผลทุกชิ้นผ่าน `privacy.scrub_paper`                                                                                                                                    | `candidate_papers`, `search_summary`, `tool_trace`              |
+| 3   | `filter_and_rank` (173)    | จัดอันดับด้วย cosine similarity ตัดด้วย threshold ต่อโมเดล แล้วเลือก top `max_papers`                                                                                                                                                                   | `ranked_papers`, `selected_papers`                              |
+| 4   | `check_sufficiency` (197)  | กฎเดียว ไม่ใช้ LLM: `need = min(MIN_PAPERS_BEFORE_RETRY, max_papers)`; `route_after_sufficiency` (218) ตัดสิน retry/extract โดยดู `MAX_RETRY_LOOPS` และงบ token `MAX_RUN_TOKENS` (`token_budget_used_up`, 213)                                       | `sufficient`, `retry_count`                                     |
+| 5   | `extract_paper_data` (278) | ดึง PDF open-access → Markdown (ถ้ามี) แล้ว LLM tier fast สกัด problem/method/dataset/findings/limitations/metrics + `supporting_quote`; ตรวจ quote ด้วย `_quote_verified` (41); paper ที่ไม่มีข้อความหรือสกัดไม่สำเร็จจะถูกบันทึกลง `skipped_papers` (326, 356) | `paper_extracts`, `skipped_papers`                              |
+| 6   | `compare_papers` (430)     | สร้างตารางเปรียบเทียบ (มีคอลัมน์ Problem) แล้ว LLM tier strong สังเคราะห์แนวโน้ม                                                                                                                                                                         | `comparison_table`, `trend_summary`                             |
+| 7   | `analyze_gaps` (562)       | เสนอ gap, ตัด id ที่ไม่มีจริง, บังคับ ≥ 2 paper, ส่ง verifier agent (`_verify_with_tools`, 499) แล้วคำนวณระดับหลักฐานด้วย `evidence.evidence_level` (666)                                                                                                   | `gap_candidates` (มี `evidence`, `evidence_level`), `tool_trace` |
+| 8   | `privacy_guard` (716)      | ตรวจคำตอบสุดท้ายด้วย detector + decision model แล้ว redact                                                                                                                                                                                         | ฟิลด์คำตอบที่ redact แล้ว                                            |
 
 ### การตรวจสอบข้อเท็จจริง (fact-checking)
 
@@ -96,10 +98,10 @@ State ที่ไหลผ่าน graph คือ `AgentState` (TypedDict, st
 
 1.  Extraction-quote grounding (node 5): LLM ต้องคืน `supporting_quote` ที่คัดลอกจากเนื้อหา แล้วเทียบแบบ substring หลังจัด whitespace ไม่มี LLM call เพิ่ม
 
-2.  Verifier (node 7): LLM รายงาน facts (เกี่ยวข้องไหม, มี counterexample ไหม, overstated ไหม) แล้ว `verifier_decision()` (nodes.py:438) ตัดสิน counterexample จะนับก็ต่อเมื่อมีประโยคที่คัดมาตรงตัว ≥ 30 ตัวอักษร (`MIN_COUNTEREXAMPLE_QUOTE_CHARS`) จากเนื้อหาที่ tool คืนมาจริง
+2.  Verifier (node 7): LLM รายงาน facts (เกี่ยวข้องไหม, มี counterexample ไหม, overstated ไหม) แล้ว `verifier_decision()` (nodes.py:473) ตัดสิน counterexample จะนับก็ต่อเมื่อมีประโยคที่คัดมาตรงตัว ≥ 30 ตัวอักษร (`MIN_COUNTEREXAMPLE_QUOTE_CHARS`) จากเนื้อหาที่ tool คืนมาจริง
 
 ``` python
-# nodes.py:40-48
+# nodes.py:41-49
 def _quote_verified(quote: str, source_text: str) -> bool:
     quote = (quote or "").strip()
     if not quote:
@@ -107,15 +109,17 @@ def _quote_verified(quote: str, source_text: str) -> bool:
     return _normalize_whitespace(quote) in _normalize_whitespace(source_text)
 ```
 
-### สูตรคะแนนความมั่นใจของ gap (nodes.py:585-613)
+### ระดับหลักฐานของ gap (evidence.py:100-149, config.py:176-193)
 
-| ส่วนประกอบ   | คะแนนสูงสุด | วิธีคิด                                                                                   |
-|-------------|-----------|----------------------------------------------------------------------------------------|
-| จำนวนหลักฐาน | 40        | `min(len(supporting_ids) / 4, 1.0) * 40`                                               |
-| ความใหม่     | 30        | `max(30 - age * 5, 5)` จากปีของเปเปอร์ใหม่สุด; ไม่มีปี = 10                                   |
-| Verifier    | 30        | supported + อ่าน ≥ 50% ของเปเปอร์ที่อ้าง = 30, supported แต่อ่านน้อยกว่า = 15, ไม่ supported = 5 |
+ระดับหลักฐานมาจากค่าที่นับได้เท่านั้น (`evidence.gap_evidence`) ไม่มีตัวเลขที่ LLM ประเมินตัวเอง เกณฑ์เขียนไว้ล่วงหน้าใน `config.py` และปรับได้ผ่าน `.env`
 
-High ≥ 75, Medium ≥ 45, นอกนั้น Low ถ้าเข้าเงื่อนไข `_confidence_caps` (วิเคราะห์ \< `HIGH_CONFIDENCE_MIN_PAPERS`=8 เปเปอร์ หรือแหล่งที่ตอบ \< 2) คะแนนจะถูกจำกัดที่ 70 (`CONFIDENCE_CAP_SCORE`) ในโค้ดมี `TODO(Member C)` ระบุว่าสูตรนี้เป็น heuristic รอบแรก ยังไม่ได้ calibrate
+| ระดับ                     | เกณฑ์ (ค่า default)                                                                                                                                                                                  |
+|--------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Limited (หลักฐานจำกัด)     | verifier ไม่รับรอง หรือมี paper ที่ขัดแย้ง ≥ 1 (counterexample ที่ยืนยัน quote แล้ว) หรือ paper สนับสนุน \< 2 หรือ verifier อ่าน paper ที่อ้าง \< 50%                                                                   |
+| Strong (หลักฐานมาก)       | ไม่ Limited และ paper สนับสนุน ≥ 3, อ่าน full text ≥ 2, verifier อ่านครบ 100%, paper ใหม่สุดอายุไม่เกิน 3 ปี และไม่ติด cap (`_confidence_caps`: วิเคราะห์ \< 8 paper, แหล่งที่ตอบ \< 2 หรือ counterexample ที่ยังไม่ยืนยัน) |
+| Moderate (หลักฐานปานกลาง) | กรณีอื่นทั้งหมด                                                                                                                                                                                         |
+
+ใต้ gap ทุกข้อแสดงค่าที่นับได้ (จำนวน paper สนับสนุน และกี่เรื่องอ่าน full text, จำนวน paper ที่ขัดแย้ง, ช่วงปีของหลักฐาน, coverage ของ verifier) และเหตุผลว่าทำไมไม่ได้ระดับสูงกว่า (`evidence.evidence_line`, evidence.py:151) คะแนน 0–100 แบบเดิมยังคำนวณและเก็บใน state (nodes.py:632) แต่ไม่ได้แสดงเป็นหลักแล้ว ใต้ gap แต่ละข้อยังแสดงประโยคหลักฐานจาก paper ที่สนับสนุน เฉพาะที่ `quote_verified` ถ้าไม่มีจะเขียนว่า "ไม่มีประโยคที่ยืนยันได้" (`evidence.evidence_quotes`, evidence.py:185)
 
 ## 4. แหล่งข้อมูล, tool calling, LLM client และ contracts
 
@@ -138,10 +142,10 @@ High ≥ 75, Medium ≥ 45, นอกนั้น Low ถ้าเข้าเ�
 
 | Agent                   | Tool                  | Arguments ที่ LLM เลือก                        | Contract                                   |
 |-------------------------|-----------------------|---------------------------------------------|--------------------------------------------|
-| search agent (node 2)   | `search_papers`       | query, source, year_from, year_to, limit    | `SearchPapersArgs` (contracts.py:136)      |
-| verifier agent (node 7) | `get_paper_text`      | paper_id, max_chars                         | `GetPaperTextArgs` (contracts.py:150)      |
-| verifier agent (node 7) | `search_paper_chunks` | paper_id, query, k                          | `SearchPaperChunksArgs` (contracts.py:158) |
-| verifier agent (node 7) | `search_corpus`       | query, k, scope (this_run / knowledge_base) | `SearchCorpusArgs` (contracts.py:164)      |
+| search agent (node 2)   | `search_papers`       | query, source, year_from, year_to, limit    | `SearchPapersArgs` (contracts.py:162)      |
+| verifier agent (node 7) | `get_paper_text`      | paper_id, max_chars                         | `GetPaperTextArgs` (contracts.py:176)      |
+| verifier agent (node 7) | `search_paper_chunks` | paper_id, query, k                          | `SearchPaperChunksArgs` (contracts.py:184) |
+| verifier agent (node 7) | `search_corpus`       | query, k, scope (this_run / knowledge_base) | `SearchCorpusArgs` (contracts.py:190)      |
 
 Harness เป็นฝ่ายบังคับ policy ไม่ใช่ LLM: argument ต้องผ่าน contract, ใช้ได้เฉพาะแหล่งที่เปิดใน sidebar, ปีถูก clamp ในช่วงที่ผู้ใช้เลือก, มีงบจำนวน call (`MAX_SEARCH_TOOL_CALLS`=10, `MAX_TOOL_STEPS`=8) เมื่อหมดงบ loop จะสั่งให้ตอบโดยไม่ใช้ tool อีก (llm_client.py:451-456)
 
@@ -158,7 +162,7 @@ Harness เป็นฝ่ายบังคับ policy ไม่ใช่ LLM
 
 ### 4.4 Contracts (contracts.py)
 
-ทุก output ของ LLM มี pydantic model: `KeywordOutput` (31), `PaperExtractOutput` (44), `GapItem` (86) / `GapProposalOutput` (98), `VerifierOutput` (102), `SensitiveEntity` (122) / `SensitiveEntitiesOutput` (129) ส่วน `GAP_CATEGORIES` (62) กำหนดหมวด gap ที่ Dashboard ใช้จัดกลุ่ม `metrics.py` นับอัตราผ่าน contract, tool calls และ token ต่อ run
+ทุก output ของ LLM มี pydantic model: `KeywordOutput` (31), `PaperExtractOutput` (44 มี field `problem` เพิ่ม และ validator ที่ปฏิเสธ extraction ที่ลอกคำอธิบาย field จาก prompt), `GapItem` (112) / `GapProposalOutput` (124), `VerifierOutput` (128), `SensitiveEntity` (148) / `SensitiveEntitiesOutput` (155) ส่วน `GAP_CATEGORIES` (88) กำหนดหมวด gap ที่ Dashboard ใช้จัดกลุ่ม `metrics.py` นับอัตราผ่าน contract, tool calls และ token ต่อ run
 
 ## 5. Privacy และ RAG knowledge base
 
@@ -204,7 +208,7 @@ TRACING_ENABLED=true
 ```
 
 ``` python
-# tracing.py:65-94 (ตัดมาบางส่วน)
+# tracing.py:66-92 (ตัดมาบางส่วน)
 def init(span_exporter=None, force: bool = False, public_key: str = None):
     ...
     have_keys = bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
@@ -221,14 +225,14 @@ def init(span_exporter=None, force: bool = False, public_key: str = None):
     _client = Langfuse(**kwargs)
 ```
 
-จุดสำคัญคือ `mask` hook: Langfuse เรียก `outbound.enforce()` กับทุก input/output/metadata ก่อนส่งออก ถ้าพบ PII จะ redact และนับเป็น metric `outbound_pii_violations` (outbound.py:41-56) ส่วน node 0 ที่ต้องอ่านหัวข้อดิบ จะบันทึก input เป็น `[withheld: raw user input before redaction]` (tracing.py:303)
+จุดสำคัญคือ `mask` hook: Langfuse เรียก `outbound.enforce()` กับทุก input/output/metadata ก่อนส่งออก ถ้าพบ PII จะ redact และนับเป็น metric `outbound_pii_violations` (outbound.py:53-69) ส่วน node 0 ที่ต้องอ่านหัวข้อดิบ จะบันทึก input เป็น `[withheld: raw user input before redaction]` (tracing.py:307) ก่อนตรวจ PII ตัว enforce จะซ่อน API key/token ในทุก payload ด้วย \`\_mask_secrets\` (outbound.py:42) ซึ่งใช้ \`logging_utils.mask_secrets\` (logging_utils.py:32) ตัวเดียวกับที่ \`SecretMaskingFilter\` (logging_utils.py:40) ใช้ซ่อนใน log
 
 ### 6.2 จุดที่เรียกใช้ tracing
 
 | จุดเรียก             | ไฟล์:บรรทัด                   | สิ่งที่เกิด                                                                                              |
 |--------------------|-----------------------------|-----------------------------------------------------------------------------------------------------|
-| CLI                | main.py:130-140             | `tracing.init()` → `tracing.run_trace(entrypoint, ...)` → `trace.finish(state)` → `tracing.flush()` |
-| Web UI             | app.py:397-414              | เหมือน CLI ใช้ `session_id` รูปแบบ `streamlit-YYYYmmdd-HHMMSS` และแสดงลิงก์ trace ในหน้าเว็บ               |
+| CLI                | main.py:122-132             | `tracing.init()` → `tracing.run_trace(entrypoint, ...)` → `trace.finish(state)` → `tracing.flush()` |
+| Web UI             | app.py:404-421              | เหมือน CLI ใช้ `session_id` รูปแบบ `streamlit-YYYYmmdd-HHMMSS` และแสดงลิงก์ trace ในหน้าเว็บ               |
 | ทุก graph node      | graph.py:25-34              | `tracing.wrap_node(name, fn)`                                                                       |
 | LLM call           | llm_client.py:105           | observation type `generation` + model, temperature, token usage                                     |
 | Tool-calling agent | llm_client.py:405, 429, 465 | `agent` → `<agent>-turn` (generation) + tool (retriever) เป็น sibling                                |
@@ -236,7 +240,7 @@ def init(span_exporter=None, force: bool = False, public_key: str = None):
 | RAG retrieval      | rag_store.py:166            | `retrieve-chunks` (retriever)                                                                       |
 | Privacy LLM        | privacy.py:141              | `tracing.withheld(...)` ไม่บันทึกเนื้อหาดิบ                                                               |
 
-### 6.3 ชื่อ observation ต่อ node (`NODE_OBSERVATIONS`, tracing.py:42-52)
+### 6.3 ชื่อ observation ต่อ node (`NODE_OBSERVATIONS`, tracing.py:43-53)
 
 | Graph node         | Observation ใน Langfuse | Type      |
 |--------------------|-------------------------|-----------|
@@ -250,84 +254,90 @@ def init(span_exporter=None, force: bool = False, public_key: str = None):
 | analyze_gaps       | propose-and-verify-gaps | chain     |
 | privacy_guard      | redact-final-answer     | guardrail |
 
-Root observation ชื่อ `run-research-gap-agent` (type agent) มี tags `research-gap`, `entrypoint:<cli|streamlit>`, `backend:<cloud|local>`, `rag:<on|off>` และ version `research-gap-agent-2.0` (tracing.py:204-224)
+Root observation ชื่อ `run-research-gap-agent` (type agent) มี tags `research-gap`, `entrypoint:<cli|streamlit>`, `backend:<cloud|local>`, `rag:<on|off>` และ version `research-gap-agent-2.0` (tracing.py:205-225)
 
-### 6.4 Scores ที่ส่งไปทุก trace (tracing.py:268-277)
+Output ระดับ trace (tracing.py:255-268) บันทึก `final_answer` ที่มี `evidence_level` และค่าที่นับได้ (`evidence`) ของ gap ทุกข้อ และ `search_scope` (แหล่ง, คำค้น, ช่วงปี, จำนวน paper, full text/abstract, paper ที่ถูกข้าม) ดังนั้นขอบเขตการค้นดูได้จาก Langfuse ด้วย ไม่ต้องเปิดรายงาน
 
-| Score                   | ความหมาย                            | ค่าใน run 2026-11-20 01:11 |
-|-------------------------|-------------------------------------|---------------------------|
-| gaps-supported          | จำนวน gap ที่ verifier บอก supported  | 4.00                      |
-| quote-verified-rate     | สัดส่วน extraction ที่ quote ตรงต้นฉบับ   | 0.60                      |
-| evidence-coverage       | สัดส่วนเปเปอร์ที่ verifier อ่านจริง (เฉลี่ย) | 1.00                      |
-| outbound-pii-violations | จำนวน PII ที่ mask hook ต้อง redact    | 0.00                      |
+### 6.4 Scores ที่ส่งไปทุก trace (tracing.py:272-281)
 
-ค่าในตารางอ่านจากหัว trace `7ac475570677b0276435e99e952847a8` ใน Langfuse (รูปด้านล่าง) trace นี้ใช้เวลา 4m 32s และ 39k tokens
+| Score                   | ความหมาย                                  | ค่าใน run 2026-11-20 19:24 |
+|-------------------------|-------------------------------------------|---------------------------|
+| gaps-supported          | จำนวน gap ที่ verifier บอก supported        | 4.00                      |
+| quote-verified-rate     | สัดส่วน extraction ที่ quote ตรงต้นฉบับ         | 0.50                      |
+| evidence-coverage       | สัดส่วน paper ที่ verifier อ่านจริง (เฉลี่ย)      | 1.00                      |
+| outbound-pii-violations | จำนวน PII ที่ mask hook ต้อง redact ก่อนส่งออก | 2.00                      |
+
+ค่าในตารางอ่านจากหัว trace `14a30b00141d7588eaacf73a8a1cdaf2` ใน Langfuse (รูป 6-1) trace นี้ใช้เวลา 7m 39s และ 77k tokens `outbound-pii-violations` = 2 หมายความว่า mask hook เจอและ redact ข้อมูลส่วนบุคคล 2 จุดก่อนส่งขึ้น Langfuse ตามที่ outbound.py อธิบายไว้ว่าคาดได้ว่าจะมีบ้างในแต่ละ run
 
 ### 6.5 Screenshot จาก Langfuse
 
-รูป 6-1: หน้า Tracing แสดง root trace `run-research-gap-agent` ในช่วง Past 1 day (Total ≈ 95) บางแถวเห็น `[REJECTED INPUT]` และ `[PERSON...` ซึ่งเป็นผลของ privacy ที่ทำงานก่อนส่ง trace
+รูป 6-1: trace ของ run 2026-11-20 19:24 ด้านบนเป็น scores ด้านซ้ายเป็น trace tree ชื่อ observation ตรงกับตาราง 6.3 ด้านขวาเปิด `search_scope` ใน output ให้เห็นแหล่งที่เปิดใช้, แหล่งที่ตอบ, คำค้น, ช่วงปี 2020–2026, 80 candidates และ 49 ที่ผ่าน cut-off
 
-![Langfuse traces list](images/14_langfuse_traces_list.jpg)
+![Langfuse trace with search_scope](images/09_langfuse_trace_scope.jpg)
 
-รูป 6-2: trace tree ของ run นี้ ชื่อ observation ตรงกับตาราง 6.3 ด้านบนมี scores 4 ตัว ด้านขวาคือ input/output ระดับ trace
+รูป 6-2: ใน trace เดียวกัน เปิด `final_answer[0]` เห็น `claim`, `evidence_level` = Moderate, `evidence` (ค่าที่นับได้ 9 รายการ), `verifier_supported` และ `supporting_papers`
 
-![Langfuse trace tree](images/11_langfuse_trace_tree.jpg)
+![Langfuse final_answer with evidence level](images/10_langfuse_final_answer.jpg)
 
-รูป 6-3: generation `search-agent-turn` (model qwen3:14b, 5k tokens) เห็นข้อความ Tool ที่ harness ส่งกลับให้ LLM (calls_left, n_new_unique, papers)
+รูป 6-3 ถึง 6-5 ถ่ายจาก run ก่อนหน้า (2026-11-20 01:11, trace `7ac47557…`) ซึ่งชื่อและชนิด observation ไม่เปลี่ยนหลังแก้ตาม feedback
+
+รูป 6-3: หน้า Tracing แสดง root trace `run-research-gap-agent` บางแถวเห็น `[REJECTED INPUT]` และ `[PERSON...` ซึ่งเป็นผลของ privacy ที่ทำงานก่อนส่ง trace
+
+![Langfuse traces list](images/11_langfuse_traces_list.jpg)
+
+รูป 6-4: generation `search-agent-turn` (model qwen3:14b) เห็นข้อความ Tool ที่ harness ส่งกลับให้ LLM (calls_left, n_new_unique, papers)
 
 ![search-agent-turn generation](images/12_langfuse_generation.jpg)
 
-รูป 6-4: retriever `search-corpus` ใต้ `verifier-agent` ใน `propose-and-verify-gaps` แสดง argument ที่ LLM เลือก (scope this_run, k 5) และ passages ที่คืนกลับ
+รูป 6-5: retriever `search-corpus` ใต้ `verifier-agent` ใน `propose-and-verify-gaps` แสดง argument ที่ LLM เลือก (scope this_run, k 5) และ passages ที่คืนกลับ
 
 ![search-corpus retriever](images/13_langfuse_verifier_tool.jpg)
 
 ## 7. Web UI (Streamlit) และ Dashboard
 
-รันด้วย `streamlit run app.py` แอปตั้งชื่อหน้า "AI Research Assistant Agent" (app.py:43) มี 2 หน้าใน sidebar: Run agent และ Dashboard (app.py:269) การรัน graph ทำใน thread แยกด้วย `agent_graph.stream(...)` แล้วส่ง event ของแต่ละ node กลับมาอัปเดต step card (app.py:401-417) Streamlit ตั้ง `fileWatcherType = "none"` ใน `.streamlit/config.toml`
+รันด้วย `streamlit run app.py` แอปตั้งชื่อหน้า "AI Research Assistant Agent" (app.py:44) มี 2 หน้าใน sidebar: Run agent และ Dashboard (app.py:276) การรัน graph ทำใน thread แยกด้วย `agent_graph.stream(...)` แล้วส่ง event ของแต่ละ node กลับมาอัปเดต step card (app.py:407-421) Streamlit ตั้ง `fileWatcherType = "none"` ใน `.streamlit/config.toml`
 
-ทุกรูปในหัวข้อนี้ถ่ายจาก run จริงเมื่อ 2026-11-20 01:11 หัวข้อ "large language models for automated code review" backend local (qwen3:14b) ใช้เวลา 273.1 วินาที (`run_info.seconds`)
+รูปในหัวข้อนี้ถ่ายจาก run จริงเมื่อ 2026-11-20 19:24 หลังแก้ตาม feedback หัวข้อ "large language models for automated code review" ช่วงปี 2020–2026 backend local (qwen3:14b) ใช้เวลา 460.6 วินาที ผลบันทึกที่ `output/20261120_193211_state.json`
 
 ### 7.1 หน้า Run agent
 
-รูป 7-1: หน้าแรก sidebar มี LLM backend, Ollama host, thinking mode, สถานะ Langfuse ("Tracing: Langfuse ON"), RAG, จำนวนเปเปอร์ (8), แหล่งข้อมูล และ Fetch full-text PDFs
+รูป 7-1: หน้าแรก sidebar มี LLM backend, Ollama host, thinking mode, สถานะ Langfuse ("Tracing: Langfuse ON"), RAG, จำนวน paper (8), แหล่งข้อมูล และ Fetch full-text PDFs
 
 ![Run agent home](images/01_app_home.jpg)
 
-รูป 7-2: step card ของ node 0–4 หลัง run เสร็จ search agent เรียก `search_papers` 5 ครั้ง ได้ 80 candidate ผ่าน cut-off 0.50 จำนวน 52 เลือก 8 สังเกตว่า Semantic Scholar ตอบ HTTP 403 (key ถูกปฏิเสธ) ระบบจึงปิดแหล่งนี้และใช้ arXiv + OpenAlex
+รูป 7-2: step card ของ node 2–5 แหล่งทั้ง 3 ตอบ (semantic_scholar retry 4 ครั้ง), 80 candidates, 49 ผ่าน cut-off 0.50, เลือก 8 สกัดสำเร็จ 6 เรื่องจาก full text ทั้งหมด อีก 2 เรื่องถูกข้ามเพราะ extraction failed (LLMError) และแสดงเหตุผลใน card
 
-![Step cards nodes 0-4](images/03_app_steps.jpg)
+![Step cards nodes 2-5](images/02_app_steps.jpg)
 
-รูป 7-3: card ของ node 5–7 แสดง gap 4 ข้อพร้อมระดับความมั่นใจ (High 75.0, 75.0, 80.0, 75.0) และ "verifier read 2/2 sources"
+รูป 7-3: ส่วน Search scope (ขอบเขตการค้น) บอกแหล่ง, คำค้นที่วางแผนและที่ค้นจริง, ช่วงปี, 80 → 49 → 8 → 6 paper (6 full text, 0 abstract) และ paper ที่ถูกข้าม 2 เรื่องพร้อมเหตุผล สังเกตว่าหัวข้อ "Papers analyzed (8 of 80 found)" ด้านล่างยังนับรวมเรื่องที่ถูกข้าม (ดูหัวข้อ 8.3)
 
-![Gap cards](images/04_app_gaps.jpg)
+![Search scope](images/03_app_search_scope.jpg)
 
-รูป 7-4: ส่วน Final answer แสดง rationale, ลิงก์เปเปอร์ที่สร้างจาก metadata (links.py) และผล verifier ตัวอย่างนี้ verifier อ้าง counterexample แต่ quote ไม่พบในเนื้อหาจริง กฎใน `verifier_decision` จึง ignore ("claimed without a verbatim sentence from its text - ignored")
+รูป 7-4: card ของ node 7 แสดง Potential Research Gaps 4 ข้อ ทุกข้อหลักฐาน Moderate (2 supporting, 0 contradicting, verifier อ่าน 2/2)
 
-![Final answer](images/05_app_final_answer.jpg)
+![Gap cards](images/04_app_gap_cards.jpg)
 
-รูป 7-5: ตาราง Tool calls (17 ครั้ง: search_agent 5, verifier_agent 12) แต่ละแถวกดดู argument ที่ LLM เลือกและ context ที่คืนได้
+รูป 7-5: ส่วน Final answer มีกล่องข้อจำกัดสองภาษา และใต้ gap แต่ละข้อมีระดับหลักฐาน (หลักฐานปานกลาง), ค่าที่นับได้, เหตุผลว่าทำไมไม่ได้ Strong, ลิงก์ paper และประโยคหลักฐาน (paper ที่ไม่มีประโยคยืนยันจะขึ้นว่า "ไม่มีประโยคที่ยืนยันได้")
+
+![Final answer with evidence level and sentences](images/05_app_final_answer.jpg)
+
+รูป 7-6: ตาราง Tool calls (16 ครั้ง: search_agent 5, verifier_agent ที่เหลือ) แต่ละแถวกดดู argument ที่ LLM เลือกและ context ที่คืนได้
 
 ![Tool calls panel](images/06_app_tool_calls.jpg)
 
-รูป 7-6: Privacy decisions (3 รายการ PERSON / cited_author จาก regex), Knowledge base (59 papers, 2,323 chunks, new 0, reused 15) และ Run metrics (llm_calls 15, input_tokens 36,329, output_tokens 2,999, tool_calls 17)
+รูป 7-7: Privacy decisions (38 รายการ) และ Knowledge base (70 papers, 2,636 chunks, new 0, reused 15)
 
-![Privacy, knowledge base, run metrics](images/07_app_privacy_kb_metrics.jpg)
-
-รูป 7-7: ลิงก์ "Langfuse trace of this run" ใต้ Full run log ซึ่งเปิด trace ในหัวข้อ 6 ได้ตรง และรายการ Papers analyzed (8 of 80 found) พร้อม similarity
-
-![Langfuse trace link and papers analyzed](images/08_app_trace_link_papers.jpg)
+![Privacy and knowledge base](images/07_app_privacy_kb.jpg)
 
 ### 7.2 หน้า Dashboard
 
-Dashboard อ่านทุก run ที่บันทึกใน `output/` (dashboard.py สำหรับข้อมูล, dashboard_page.py สำหรับหน้า) ค่า KPI ตอนถ่ายรูป: Runs 25, Topics 8, Papers analysed 155, Gaps 80, Supported 53, Refuted 6, High confidence 48, Mean confidence 68.6
+Dashboard อ่านทุก run ที่บันทึกใน `output/` (dashboard.py สำหรับข้อมูล, dashboard_page.py สำหรับหน้า) หัวหน้าใช้คำ Potential Research Gaps และมีประโยคข้อจำกัด run เก่าที่มีแต่คะแนน 0–100 จะคำนวณระดับหลักฐานใหม่จากข้อมูลที่เก็บไว้ ค่า KPI ตอนถ่ายรูป: Runs 29, Topics 9, Papers analysed 183, Gaps 95, Supported 66, Refuted 8, Strong evidence 0, Limited evidence 22
 
-รูป 7-8: KPI, กราฟ Gaps by category และ Confidence by verdict, ตาราง All gaps
+รูป 7-8: KPI, กราฟ Gaps by category และ Evidence level by verdict, ตาราง All potential research gaps
 
-![Dashboard KPIs and charts](images/09_dashboard_top.jpg)
+![Dashboard](images/08_dashboard.jpg)
 
-รูป 7-9: ส่วน Gaps refuted by a paper (พร้อมลิงก์เปเปอร์ที่ refute), Possible counterexamples to check (8) และ Stock gaps ที่ซ้ำข้ามหัวข้อ (5)
-
-![Dashboard refuted gaps](images/10_dashboard_refuted.jpg)
+สังเกตว่าใน 95 gaps ไม่มีข้อไหนได้ Strong เลย เพราะ Strong ต้องมี paper สนับสนุน ≥ 3 และต้องไม่ติด cap ที่ต้องวิเคราะห์ครบ ≥ 8 paper ขณะที่ gap ส่วนใหญ่อ้าง 2 paper และหลาย run มี paper ที่ถูกข้าม จึงวิเคราะห์ได้ไม่ถึง 8 เกณฑ์เข้มตามที่ตั้งใจ แต่ถ้าต้องการให้มี Strong เกิดขึ้นได้จริง ต้องเพิ่ม Papers to deep-analyze หรือปรับเกณฑ์ใน .env
 
 ## 8. ผลการประเมิน, วิธีรัน และข้อสังเกต
 
@@ -340,6 +350,18 @@ Dashboard อ่านทุก run ที่บันทึกใน `output/` 
 | Embedding สำหรับ RAG (README)                                 | compare_embeddings_20261118_183251.md      | embeddinggemma:300m hit@3 EN 0.88 / TH 0.76 (ดีที่สุดใน 4 ตัว)                                                          |
 | เทียบ LLM (README)                                            | compare_models_20261118_213550.md          | qwen3:14b vs gpt-oss:20b vs qwen3.5:9b: qwen3:14b เร็วสุด 377 s/run, ไม่มี run ล้ม, quote verified 0.80 → ใช้เป็น default |
 | Header privacy auto vs always (12 PDF)                       | validate_header_privacy_20261119_135459.md | auto ประหยัด 57 s แต่ปล่อย 17 รายการที่ควร redact → คง default `always`                                                 |
+
+หลังปรับตาม feedback มี script ประเมินใหม่ 3 ตัวและ template สำหรับคำตอบที่คนกำกับ ยังไม่มีผลใน `evaluation/results/` จนกว่าจะรันหรือกรอกคำตอบ
+
+| Script / ไฟล์                                                      | วัดอะไร                                                         | สถานะ                             |
+|-------------------------------------------------------------------|----------------------------------------------------------------|-----------------------------------|
+| evaluation/eval_extraction.py + data/extraction_gold_TEMPLATE.csv | Problem/Method/Dataset/Findings เทียบกับที่คนอ่านและกำกับ            | template ว่าง ต้องให้สมาชิกกลุ่มกรอก    |
+| evaluation/eval_citations.py                                      | title / ปี / DOI ของ paper ที่ gap อ้าง เทียบ OpenAlex และ Crossref | รันได้เลย (ต้องต่อเน็ต) ยังไม่ได้รัน       |
+| evaluation/eval_query_adaptation.py                               | หัวข้อแคบ: เกิด retry ไหม คำค้นเปลี่ยนไหม paper เพิ่มไหม               | รันได้เลย ยังไม่ได้รัน                  |
+| evaluation/calibrate_ranking.py                                   | เพิ่ม p@10                                                       | ต้องรันใหม่ ผลในไฟล์เป็นของ 2026-11-19 |
+| data/gap_reference_TEMPLATE.csv, data/gap_rating_TEMPLATE.csv     | gap อ้างอิงที่คนเขียน และคะแนนที่คนให้กับ gap ที่ระบบเสนอ                 | template ว่าง ต้องให้สมาชิกกลุ่มกรอก    |
+
+แผนการประเมินครบ 7 มิติตาม feedback อยู่ใน `evaluation/eval_plan.md`
 
 ### 8.2 วิธีติดตั้งและรัน (จาก README)
 
@@ -361,28 +383,51 @@ Dashboard อ่านทุก run ที่บันทึกใน `output/` 
 
 ### 8.3 ข้อสังเกตจากการตรวจโค้ดและการรันจริง
 
-- Semantic Scholar key ในเครื่องถูกปฏิเสธ (HTTP 403) ใน run 2026-11-20 ระบบปิดแหล่งนี้หลังล้ม 3 ครั้ง ตามที่ออกแบบไว้ ควรตรวจ `SEMANTIC_SCHOLAR_API_KEY`
+- แก้แล้ว: Full run log เคยพิมพ์ `api_key=` ของ OpenAlex ตอนนี้ `SecretMaskingFilter` (logging_utils.py:40) ซ่อนเป็น `***` แล้ว ตรวจใน `output/real_run_teacher_feedback_2.log` ไม่พบค่า key
 
-- Full run log ใน UI พิมพ์ URL ของ OpenAlex ที่มีพารามิเตอร์ `api_key=` ออกมาตรง ๆ (log ระดับ INFO ของ httpx) และมีปุ่มดาวน์โหลด log หากจะแชร์ log ควร mask key หรือลดระดับ log ของ httpx (เอกสารนี้ไม่ได้ใส่ค่า key)
+- แก้แล้ว: README ตรงกับโค้ด (ชื่อ observation ของ Langfuse, จำนวน candidates ใน calibration, OpenAlex ต้องมี key) ใน commit `1e63383`
 
-- ตารางชื่อ observation ใน README (`node:<name>`, `llm:fast`, `tool:<name>`) ไม่ตรงกับโค้ดปัจจุบัน โค้ดใช้ชื่อแบบ verb-first ตามตาราง 6.3 ซึ่งตรงกับที่เห็นใน Langfuse
+- Semantic Scholar เคยตอบ 403 ใน run 2026-11-20 01:11 แต่ใน run 13:10 ตอบปกติ ครั้งนั้น arXiv โดน 429 แทน ระบบปิดแหล่งที่ล้มและแสดงใน Search scope ทุกครั้ง
 
-- README บอก "23 offline tests" แต่ tests/test_pipeline.py มีฟังก์ชัน `def test_` 55 ตัว (นับด้วย grep ไม่ได้รัน pytest)
+- Bug เล็ก: ในรายงาน run 13:10 ส่วน "Papers analyzed" แสดง 8 เรื่อง รวมเรื่องที่ถูกข้าม ขณะที่ Search scope บอกว่าวิเคราะห์ 7 เรื่อง
 
-- README ส่วน calibration เขียน 136 candidates แต่ไฟล์ผลเขียน 138
+- คะแนน 0–100 แบบเดิมยังอยู่ใน state (`TODO(Member C)` ยังไม่ calibrate) แต่ไม่ได้ใช้ตัดสินระดับหลักฐานแล้ว
 
-- README ส่วนติดตั้งบอกว่า openalex ใช้ได้โดยไม่ต้องมี key แต่ .env.example และส่วน Quality fixes บอกว่าต้องมี key ตั้งแต่ Feb 2026
-
-- สูตร confidence ยังเป็น heuristic (`TODO(Member C)`) ใน run นี้ gap ทั้ง 4 ข้อได้ High ทั้งที่ verifier 3 ครั้งเสนอ counterexample ที่ถูกปฏิเสธเพราะ quote ไม่ตรง (`verifier_counterexample_rejected: 3`)
+- ไม่ได้รัน pytest ในการเขียนเอกสารนี้ tests/test_pipeline.py มีฟังก์ชัน `def test_` 73 ตัว (นับด้วย grep)
 
 ### 8.4 แหล่งอ้างอิง
 
-- โค้ด: `D:\NLP_mini_project\ai_research_gap_agent\` (graph.py, nodes.py, tracing.py, outbound.py, llm_client.py, tools.py, privacy.py, rag_store.py, contracts.py, config.py, app.py, main.py, sources/\*, decision_model/sensitive_info.dmn.json)
+- โค้ด: `D:\NLP_mini_project\ai_research_gap_agent\` branch `main` commit `801553a` (graph.py, nodes.py, evidence.py, tracing.py, outbound.py, logging_utils.py, llm_client.py, tools.py, privacy.py, rag_store.py, contracts.py, config.py, app.py, main.py, sources/\*, decision_model/sensitive_info.dmn.json, evaluation/\*)
 
-- เอกสารประกอบในโปรเจกต์: README.md, .env.example, requirements.txt, evaluation/results/\*.md
+- เอกสารประกอบในโปรเจกต์: README.md, .env.example, requirements.txt, evaluation/eval_plan.md, evaluation/results/\*.md
 
-- ผลการรันจริง: `output/20261120_011606_state.json`
+- ผลการรันจริง: ดูหัวข้อ 7 (ไฟล์ state JSON ของ run ที่ถ่ายรูป) และ `output/20261120_131034_report.md`
 
-- Langfuse trace: `http://localhost:3000/project/cmwm32zly0009qx4pe85wfu6m/traces/7ac475570677b0276435e99e952847a8` (เปิดได้เฉพาะเครื่องที่รัน Langfuse)
+- Feedback ของอาจารย์และข้อเสนอโครงการ (ไฟล์ที่ผู้ใช้แนบมา)
 
 - ไม่ได้อ่าน: docs/AI_Research_Assistant_Agent_Architecture.docx และ docs/NLP_AI Research Assistant Agent.pdf
+
+## 9. เทียบ feedback ของอาจารย์กับสิ่งที่ทำแล้ว
+
+ทุกข้อที่แก้ด้วยโค้ดได้ทำแล้ว ส่วนที่เหลือคือการประเมินที่ต้องใช้คำตอบจากคน
+
+| Feedback                                                     | สถานะ                      | หลักฐานในโค้ด                                                                                                         |
+|--------------------------------------------------------------|----------------------------|---------------------------------------------------------------------------------------------------------------------|
+| ใช้คำ "Potential Research Gaps" + บอกข้อจำกัด                   | ทำแล้ว                      | `evidence.ANSWER_TITLE`, `LIMITATION_NOTE` (evidence.py:11-18) ใช้ในรายงาน, UI, Dashboard, prompt                    |
+| ระบุขอบเขต: แหล่ง, คำค้น, ช่วงปี, จำนวน paper, abstract/full text | ทำแล้ว                      | `evidence.search_scope` (evidence.py:24) → รายงาน (main.py:30), UI (app.py:592), Langfuse trace                     |
+| เริ่มจากแหล่งเดียว / candidate 20–30                             | ตัดสินใจไม่ทำ                 | ใช้ 3 แหล่งที่มีการตัดรายการซ้ำและติดตามสถานะแหล่งแล้ว และ candidate 80 ตัดด้วย cut-off เหตุผลอยู่ใน README                        |
+| เลือก 8–12 paper                                              | ทำแล้ว                      | default 8 (`MAX_DEEP_ANALYSIS_PAPERS`)                                                                              |
+| ดึง Problem, Method, Dataset, Findings                        | ทำแล้ว                      | `PaperExtractOutput.problem` (contracts.py:45) + คอลัมน์ Problem ในตารางเปรียบเทียบ                                     |
+| Gap พร้อมรายการ paper + ข้อความหลักฐาน                          | ทำแล้ว                      | `evidence.evidence_quotes` (evidence.py:185) แสดงเฉพาะประโยคที่ยืนยันแล้ว                                                |
+| ผลน้อย → ขยาย keyword                                         | ทำแล้ว                      | `check_sufficiency` → `generate_keywords` + `RETRY_CONTEXT_TEMPLATE`                                                |
+| ผลกว้างเกิน → เพิ่มเงื่อนไข                                        | จัดการด้วย cut-off           | README หัวข้อ Decision rules: cut-off + `max_papers` แทนการวนคำค้น                                                     |
+| Paper ไม่มี abstract → ข้าม/แจ้ง                                 | ทำแล้ว                      | `skipped_papers` (nodes.py:326, 356) แสดงใน Search scope                                                            |
+| ตรวจแหล่งอ้างอิง                                                | บางส่วน                     | ในระบบ: ตัด id ที่ไม่มีจริง + ลิงก์จาก metadata; ตรวจ DOI กับ Crossref อยู่ใน `eval_citations.py`                              |
+| เงื่อนไขหยุด: รอบและค่าใช้จ่าย                                     | ทำแล้ว                      | `MAX_RETRY_LOOPS`, `MAX_SEARCH_TOOL_CALLS`, `MAX_TOOL_STEPS`, `MAX_RUN_TOKENS` (config.py:154) ตาราง 20 กฎใน README |
+| Confidence ไม่ใช่ตัวเลขที่ LLM ให้ตัวเอง + คำ มาก/ปานกลาง/จำกัด      | ทำแล้ว                      | `evidence.evidence_level` + เกณฑ์ใน config.py:176-193                                                                |
+| ประเมิน relevance Top 5/10 โดยคน                              | ทำแล้ว (ต้องรันใหม่เพื่อได้ p@10) | label 138 เรื่องใน `ranking_set.json`                                                                                 |
+| ประเมิน extraction เทียบคน                                     | รอคนกรอก                   | `eval_extraction.py` + template                                                                                     |
+| ประเมิน DOI/ชื่อ/ปี                                              | รอรัน                       | `eval_citations.py`                                                                                                 |
+| ประเมินการปรับ query                                           | รอรัน                       | `eval_query_adaptation.py`                                                                                          |
+| ไม่สร้าง paper/DOI ปลอม                                        | ทำแล้ว                      | metric `gap_ids_hallucinated`, ลิงก์สร้างจาก metadata (links.py)                                                       |
+| เวลา รอบ ค่าใช้จ่าย                                             | ทำแล้ว                      | `run_info.seconds`, `run_metrics` (token, tool calls), Langfuse                                                     |
