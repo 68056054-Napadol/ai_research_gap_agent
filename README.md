@@ -655,10 +655,21 @@ where speed matters more than a few leaked citation names.
 python -m pytest -q tests                      # 23 offline tests, no network/API key (fictional data)
 python evaluation/consistency_test.py --runs 5 --max-papers 6          # same question x5
 python evaluation/compare_models.py --runs 2 --max-papers 5            # Claude vs Ollama (qwen3)
+python evaluation/calibrate_ranking.py --models "gemma=ollama:embeddinggemma:300m"   # AUC, cut-off, p@5/8/10
+python evaluation/eval_query_adaptation.py --max-papers 8              # narrow topics: retry, new queries, more papers?
+python evaluation/eval_citations.py                                    # cited title/year/DOI vs OpenAlex + Crossref
+python evaluation/eval_extraction.py --make-template output/<run>_state.json   # empty template for annotators
+python evaluation/eval_extraction.py --gold evaluation/data/extraction_gold_<run>.csv  # after people filled it in
 ```
 
-Both scripts write Markdown + JSON to `evaluation/results/`. `--offline` runs them on the fake
-data in `tests/fakes.py` — only to check the script works, the numbers are not an evaluation.
+All scripts write Markdown + JSON to `evaluation/results/`. `--offline` (consistency, compare
+models, query adaptation) runs them on the fake data in `tests/fakes.py` — only to check the
+script works, the numbers are not an evaluation.
+
+The seven evaluation dimensions, and **which parts need a person** (reference answers, ratings,
+labels — no script writes them), are in [`evaluation/eval_plan.md`](evaluation/eval_plan.md).
+Templates for the human parts: `evaluation/data/extraction_gold_TEMPLATE.csv`,
+`gap_reference_TEMPLATE.csv`, `gap_rating_TEMPLATE.csv`.
 
 ## RAG knowledge base (KM)
 

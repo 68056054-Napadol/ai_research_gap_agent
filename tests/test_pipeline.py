@@ -1014,3 +1014,85 @@ def test_outbound_contract_masks_api_keys():
     import outbound
     out = outbound.enforce({"error": "Client error '403' for url 'https://api.openalex.org/works?api_key=K3Y&x=1'"}, "test")
     assert "K3Y" not in out["error"] and "api_key=***" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# Evaluation scaffolding (the human answers themselves are never written by code)
+# ---------------------------------------------------------------------------
+def _eval_module(name):
+    import importlib
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "evaluation"))
+    return importlib.import_module(name)
+
+
+def test_extraction_gold_template_is_empty_and_scoring_works(tmp_path):
+    ev = _eval_module("eval_extraction")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    template = open(os.path.join(root, "evaluation", "data", "extraction_gold_TEMPLATE.csv"), encoding="utf-8").read()
+    assert template.strip() == "paper_id,title,problem,method,dataset,findings,annotator"   # header only, no answers
+    assert ev.token_f1("prompt-based few-shot NER", "few-shot NER with prompts") > 0.5
+    assert ev.token_f1("not stated", "Not stated.") == 1.0 and ev.token_f1("CoNLL", "not stated") == 0.0
+    state = {"paper_extracts": [{"paper_id": "arxiv:1", "problem": "few-shot NER", "method": "prompting",
+                                 "dataset": "not stated", "key_findings": "F1 improves by 4 points",
+                                 "extraction_confidence": "abstract_only"}]}
+    (tmp_path / "20261120_000000_state.json").write_text(json.dumps(state), encoding="utf-8")
+    gold = tmp_path / "gold.csv"
+    gold.write_text("paper_id,title,problem,method,dataset,findings,annotator\n"
+                    "arxiv:1,T,few-shot NER,prompting,not stated,F1 improves 4 points,A\n"
+                    "arxiv:1,T,few-shot NER,prompt tuning,,F1 +4,B\n"
+                    "arxiv:2,T2,x,y,z,w,A\n"
+                    "arxiv:3,,,,,,A\n", encoding="utf-8")                       # empty row = not filled in yet
+    rows = ev.load_gold([str(gold)])
+    assert len(rows) == 3
+    res = ev.evaluate(rows, ev.load_extracts(str(tmp_path / "*_state.json")))
+    assert res["missing_in_runs"] == ["arxiv:2"] and res["n_scored"] == 2
+    assert res["fields"]["problem"]["mean_f1"] == 1.0 and res["fields"]["dataset"]["n"] == 1
+    assert res["inter_annotator"]["method"]["pairs"] == 1
+    assert "| problem | 2 | 1.0 |" in ev.to_markdown(res, [str(gold)])
+
+
+def test_citation_check_compares_title_year_and_doi():
+    ec = _eval_module("eval_citations")
+    paper = {"run_id": "r", "id": "arxiv:1", "role": "supporting", "title": "Few-Shot NER: A Survey", "year": 2023,
+             "doi": "https://doi.org/10.1/ABC"}
+    calls = []
+
+    def get(url, params):
+        calls.append((url, dict(params)))
+        if url.endswith("/doi:10.1/abc"):
+            return {"id": "W1", "display_name": "Few-shot NER - a survey", "publication_year": 2024,
+                    "doi": "https://doi.org/10.1/abc"}
+        return None
+    rec, how = ec.lookup_openalex(paper, get, api_key="K")
+    assert how == "by DOI" and calls[0][1] == {"api_key": "K"}
+    cmp = ec.compare(paper, rec, 0.9)
+    assert cmp["title_match"] and cmp["doi_match"] and cmp["year_match"] is False and cmp["year_within_1"]
+    res = ec.evaluate([paper, {**paper, "id": "arxiv:2", "doi": None, "title": ""}],
+                      {"openalex": lambda p: ec.lookup_openalex(p, get)})
+    s = res["sources"]["openalex"]["summary"]
+    assert s["found"]["rate"] == 0.5 and s["title_match"]["rate"] == 1.0
+    assert "mismatches to check" in ec.to_markdown(res)
+    cr = ec._crossref_record({"title": ["<i>Few</i>-shot NER"], "issued": {"date-parts": [[2022, 5]]}, "DOI": "10.1/X"})
+    assert cr == {"title": "<i>Few</i>-shot NER", "year": 2022, "doi": "10.1/x"}
+    assert ec.title_similarity(cr["title"], "Few-shot NER") == 1.0
+
+
+def test_query_adaptation_is_measured_from_search_rounds(offline, monkeypatch):
+    qa = _eval_module("eval_query_adaptation")
+    monkeypatch.setattr(CONFIG, "min_papers_before_retry", 7)      # fake source has only 6 papers -> retries
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 8)
+    rounds = state["search_rounds"]
+    assert len(rounds) == CONFIG.max_retry_loops and [r["round"] for r in rounds] == [1, 2, 3]
+    assert all(r["planned_queries"] and "n_selected" in r and "n_candidates_total" in r for r in rounds)
+    r = qa.adaptation(state)
+    assert r["retry_happened"] and r["stopped_by"] == "MAX_RETRY_LOOPS" and r["n_rounds"] == 3
+    assert r["papers_increased"] is False             # fakes never change with the query - by construction
+    assert "Query adaptation" in qa.to_markdown([r], offline=True)
+
+
+def test_precision_at_10():
+    cr = _eval_module("calibrate_ranking")
+    labels = [1] * 7 + [0] * 5
+    scores = list(range(12, 0, -1))           # first 7 (on topic) score highest
+    assert cr.precision_at(labels, scores, 10) == 0.7
+    assert cr.precision_at(labels[:4], scores[:4], 10) == 1.0     # fewer than 10 candidates: use them all

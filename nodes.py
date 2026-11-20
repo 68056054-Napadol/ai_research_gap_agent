@@ -97,9 +97,12 @@ def generate_keywords(state: AgentState) -> dict:
     queries = result["queries"]
     logger.info("Generated %d search queries: %s", len(queries), queries)
 
+    rounds = list(state.get("search_rounds") or [])
+    rounds.append({"round": len(rounds) + 1, "planned_queries": queries})
     return {
         "search_queries": queries,
         "prior_queries_tried": prior + queries,
+        "search_rounds": rounds,   # one entry per search round - evaluation/eval_query_adaptation.py
     }
 
 
@@ -148,8 +151,13 @@ def search_sources(state: AgentState) -> dict:
         h = health.get(src)
         if h and h["ok"] == 0:
             logger.warning("Source %s returned nothing usable this run: %s", src, h["last_error"] or "no response")
+    rounds = [dict(r) for r in (state.get("search_rounds") or [{"round": 1}])]
+    rounds[-1].update({"searched_queries": [t["arguments"].get("query") for t in trace
+                                            if t.get("tool_name") == "search_papers" and t.get("ok", True)],
+                       "n_found_this_round": len(ctx.papers), "n_candidates_total": len(merged)})
     return {
         "candidate_papers": merged,
+        "search_rounds": rounds,
         "enabled_sources": list(ctx.enabled_sources),
         "source_health": health,
         "search_summary": result.final_text.strip(),
@@ -178,7 +186,9 @@ def filter_and_rank(state: AgentState) -> dict:
     budget = state.get("max_papers") or CONFIG.max_deep_analysis_papers   # CLI --max-papers / UI slider
     selected = above_threshold[:budget]
     logger.info("Selected top %d papers for deep analysis (budget: %d)", len(selected), budget)
-    return {"ranked_papers": above_threshold, "selected_papers": selected}
+    rounds = [dict(r) for r in (state.get("search_rounds") or [{"round": 1}])]
+    rounds[-1].update({"n_passed_cutoff": len(above_threshold), "n_selected": len(selected)})
+    return {"ranked_papers": above_threshold, "selected_papers": selected, "search_rounds": rounds}
 
 
 # ---------------------------------------------------------------------------

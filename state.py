@@ -72,6 +72,8 @@ class AgentState(TypedDict, total=False):
     # --- Node 1 ---
     search_queries: list        # list[str]
     prior_queries_tried: list   # accumulates across retry loops
+    search_rounds: list         # [{round, planned_queries, searched_queries, n_found_this_round, n_candidates_total,
+                                 #   n_passed_cutoff, n_selected}] one per search round (retry loops)
 
     # --- Node 2: search agent (LLM tool calling) ---
     candidate_papers: list      # list[Paper], accumulated across retry loops

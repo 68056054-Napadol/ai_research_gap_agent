@@ -1,0 +1,1 @@
+run_id,gap_no,claim,is_real_gap_in_these_papers (yes/partly/no),evidence_supports_claim (1-5),novelty (1-5),actionability (1-5),agrees_with_evidence_level (yes/no),matches_reference_gap (id or none),annotator,notes

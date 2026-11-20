@@ -10,7 +10,8 @@ For each model it reports
   - the cut-off that keeps >= 95% of the on-topic papers (recall first: a wrongly dropped paper
     is lost to the whole run, a wrongly kept one only costs a slot in the ranking), and how many
     off-topic papers that cut-off still lets through,
-  - precision@5 / @8: of the top papers that would go to deep analysis, how many are on topic.
+  - precision@5 / @8 / @10: of the top papers that would go to deep analysis, how many are on topic
+    (@10 = share of the top 10 by score; a topic with fewer than 10 candidates uses them all).
 
     python evaluation/calibrate_ranking.py --models "old=sentence_transformers:BAAI/bge-small-en-v1.5|raw" \
         "bge=sentence_transformers:BAAI/bge-small-en-v1.5" "gemma=ollama:embeddinggemma:300m"
@@ -56,6 +57,12 @@ def auc(scores, labels) -> float:
     return wins / (len(pos) * len(neg))
 
 
+def precision_at(labels, scores, k: int) -> float:
+    """Share of on-topic papers among the top k by score."""
+    order = np.argsort(-np.asarray(scores, dtype=float))[:k]
+    return float(np.mean([labels[i] for i in order])) if len(order) else float("nan")
+
+
 def score_set(spec: str, raw: bool, topic: str, items: list) -> np.ndarray:
     import embeddings
     from config import CONFIG
@@ -92,7 +99,8 @@ def main():
             order = np.argsort(-s)
             p5 = float(np.mean([labels[i] for i in order[:5]]))
             p8 = float(np.mean([labels[i] for i in order[:8]]))
-            per_topic.append({"topic": t["topic"], "auc": auc(list(s), labels), "p@5": p5, "p@8": p8,
+            p10 = precision_at(labels, s, 10)
+            per_topic.append({"topic": t["topic"], "auc": auc(list(s), labels), "p@5": p5, "p@8": p8, "p@10": p10,
                               "pos_min": float(min(x for x, l in zip(s, labels) if l)),
                               "neg_max": float(max(x for x, l in zip(s, labels) if not l))})
             all_s += list(map(float, s)); all_l += labels
@@ -107,20 +115,22 @@ def main():
         print(f"{label}: AUC {rows[label]['auc']:.3f}  cut@{args.recall:.0%} recall {cut:.3f}  "
               f"off-topic kept {leak}/{n_neg}  range {rows[label]['score_range']}")
         for pt in per_topic:
-            print(f"    {pt['topic'][:50]:50s} AUC {pt['auc']:.3f} p@5 {pt['p@5']:.2f} p@8 {pt['p@8']:.2f}")
+            print(f"    {pt['topic'][:50]:50s} AUC {pt['auc']:.3f} p@5 {pt['p@5']:.2f} p@8 {pt['p@8']:.2f} "
+                  f"p@10 {pt['p@10']:.2f}")
 
     os.makedirs("evaluation/results", exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     n_items = sum(len(t["items"]) for t in data)
     lines = [f"# Ranking calibration ({n_items} hand-labelled candidates, {len(data)} topics)", "",
              f"Cut-off = score that keeps {args.recall:.0%} of on-topic papers.", "",
-             "| model | AUC | cut-off | off-topic kept | p@5 (per topic) | p@8 (per topic) | score range |",
-             "|---|---|---|---|---|---|---|"]
+             "| model | AUC | cut-off | off-topic kept | p@5 (per topic) | p@8 (per topic) | p@10 (per topic) | score range |",
+             "|---|---|---|---|---|---|---|---|"]
     for label, r in rows.items():
         p5 = " / ".join(f"{pt['p@5']:.2f}" for pt in r["per_topic"])
         p8 = " / ".join(f"{pt['p@8']:.2f}" for pt in r["per_topic"])
+        p10 = " / ".join(f"{pt['p@10']:.2f}" for pt in r["per_topic"])
         lines.append(f"| {label}: {r['spec']} | {r['auc']:.3f} | {r['cut_at_recall']} | {r['off_topic_kept']} "
-                     f"| {p5} | {p8} | {r['score_range'][0]}-{r['score_range'][1]} |")
+                     f"| {p5} | {p8} | {p10} | {r['score_range'][0]}-{r['score_range'][1]} |")
     path = f"evaluation/results/calibrate_ranking_{stamp}.md"
     open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
     json.dump(rows, open(path[:-3] + ".json", "w", encoding="utf-8"), indent=1)
