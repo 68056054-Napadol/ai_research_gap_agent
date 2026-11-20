@@ -43,6 +43,7 @@ class GapCandidate(TypedDict, total=False):
     claim: str
     supporting_paper_ids: list
     supporting_papers: list    # [{id, title, year, url}] - links.supporting_papers, only real analyzed papers
+    evidence_quotes: list      # [{id, title, year, quote}] - quote only if the extraction's quote_verified
     rationale: str
     evidence_level: str        # "Strong" | "Moderate" | "Limited" - evidence.evidence_level, from countable facts
     evidence: dict             # evidence.gap_evidence: n_supporting, n_supporting_full_text, n_contradicting,

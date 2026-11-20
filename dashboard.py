@@ -139,6 +139,7 @@ def gap_rows(runs: list) -> list:
                 "verdict_reason": g.get("verifier_decision_reason", ""),
                 "rationale": g.get("rationale", ""),
                 "supporting_papers": g.get("supporting_papers") or [],
+                "evidence_quotes": evidence.quotes_for_saved_gap(g, st),
                 "counterexample_paper": _counterexample(g, papers_by_id) if status != STATUS_SUPPORTED else None,
                 "counterexample_id": facts.get("counterexample_paper_id"),
                 "counterexample_quote": facts.get("counterexample_quote") if status in (STATUS_REFUTED, STATUS_REFUTED_OLD) else None,

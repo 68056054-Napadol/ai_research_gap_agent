@@ -53,6 +53,9 @@ def render_report(state: dict) -> str:
             "*Supporting papers:*",
             *[f"- {links.markdown_link(sp)} `{sp['id']}`" for sp in gap.get("supporting_papers", [])],
             "",
+            "*Evidence sentences (verified verbatim in each supporting paper's text):*",
+            *evidence.quote_lines(evidence.quotes_for_saved_gap(gap, state)),
+            "",
             f"*Verifier notes:* {gap.get('verifier_notes', '')}",
             "",
         ]

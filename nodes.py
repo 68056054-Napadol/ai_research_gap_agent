@@ -639,6 +639,8 @@ def analyze_gaps(state: AgentState) -> dict:
             "claim": gap["claim"],
             "supporting_paper_ids": supporting_ids,
             "supporting_papers": links.supporting_papers(supporting_ids, papers_by_id),
+            # verified sentence from each supporting paper (None = no quote found verbatim in its text)
+            "evidence_quotes": evidence.evidence_quotes(supporting_ids, extracts_by_id, papers_by_id),
             "rationale": gap.get("rationale", ""),
             "evidence_level": level,                 # Strong | Moderate | Limited - the level shown to the user
             "evidence": ev,                          # the countable facts it was decided from

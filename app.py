@@ -627,6 +627,8 @@ elif state:
             st.write(gap.get("rationale", ""))
             st.markdown("**Supporting papers** (links built from paper metadata, not written by the AI):  \n"
                         + "  \n".join(f"• {links.markdown_link(sp)}" for sp in gap.get("supporting_papers", [])))
+            st.markdown("**Evidence sentences** (each paper's quote, only when found verbatim in its text):  \n"
+                        + "  \n".join(evidence.quote_lines(evidence.quotes_for_saved_gap(gap, state))))
             st.caption(f"Verifier notes: {gap.get('verifier_notes', '')}")
             if gap.get("verifier_decision_reason"):
                 f = gap.get("verifier_facts") or {}

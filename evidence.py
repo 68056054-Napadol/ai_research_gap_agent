@@ -174,3 +174,34 @@ def evidence_for_saved_gap(g: dict, state: dict, current_year: int, cfg=None) ->
                       coverage=g.get("evidence_coverage") or 0)
     level, reasons = evidence_level(ev, g.get("confidence_caps") or [], current_year, cfg)
     return ev, level, reasons
+
+
+# ---------------------------------------------------------------------------
+# Evidence sentences: the verified quote of each supporting paper
+# ---------------------------------------------------------------------------
+NO_VERIFIED_QUOTE = "ไม่มีประโยคที่ยืนยันได้"
+
+
+def evidence_quotes(supporting_ids: list, extracts_by_id: dict, papers_by_id: dict) -> list:
+    """[{id, title, year, quote}] for every supporting paper. quote is the extraction's
+    supporting_quote ONLY when quote_verified=True (found verbatim in the text the model was shown);
+    otherwise None, shown as NO_VERIFIED_QUOTE - an unverified quote may be invented."""
+    out = []
+    for pid in supporting_ids:
+        ex, p = extracts_by_id.get(pid) or {}, papers_by_id.get(pid) or {}
+        quote = (ex.get("supporting_quote") or "").strip() if ex.get("quote_verified") else ""
+        out.append({"id": pid, "title": p.get("title") or pid, "year": p.get("year"), "quote": quote or None})
+    return out
+
+
+def quotes_for_saved_gap(g: dict, state: dict) -> list:
+    if "evidence_quotes" in g:
+        return g["evidence_quotes"]
+    return evidence_quotes(g.get("supporting_paper_ids") or [],
+                           {e.get("paper_id"): e for e in state.get("paper_extracts") or []},
+                           {p["id"]: p for p in state.get("selected_papers") or [] if p.get("id")})
+
+
+def quote_lines(quotes: list) -> list:
+    return [f"- {q['title']} ({q.get('year') or 'n.d.'}): " + (f"“{q['quote']}”" if q.get("quote") else f"_{NO_VERIFIED_QUOTE}_")
+            for q in quotes]

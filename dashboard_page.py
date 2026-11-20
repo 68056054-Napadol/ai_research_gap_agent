@@ -93,7 +93,7 @@ def render():
                                 "evidence_level": "evidence", "n_supporting": "supporting",
                                 "n_full_text": "full text", "n_contradicting": "contradicting",
                                 "evidence_years": "years", "evidence_coverage": "verifier read"})
-    st.download_button("Download these gaps (.csv)", table.drop(columns=["supporting_papers", "counterexample_paper", "evidence"])
+    st.download_button("Download these gaps (.csv)", table.drop(columns=["supporting_papers", "counterexample_paper", "evidence", "evidence_quotes"])
                        .to_csv(index=False).encode("utf-8-sig"), "potential_research_gaps.csv", "text/csv")
 
     # ---- refuted gaps, with the paper that refutes them ----
@@ -149,6 +149,7 @@ def render():
                            + "; ".join(g["evidence_level_reasons"]))
             st.write(g["rationale"])
             st.markdown("**Supporting papers:**  \n" + "  \n".join(f"• {_link(p)}" for p in g["supporting_papers"]))
+            st.markdown("**Evidence sentences:**  \n" + "  \n".join(evidence.quote_lines(g["evidence_quotes"])))
             if g["counterexample_paper"]:
                 st.markdown(f"**Refuted by:** {_link(g['counterexample_paper'])}")
             st.caption(f"Verdict rule: {g['verdict_reason']}")

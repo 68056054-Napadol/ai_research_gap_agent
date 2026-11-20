@@ -938,3 +938,28 @@ def test_problem_is_extracted_and_shown_in_the_comparison_table(offline):
     assert '"problem"' in extract_prompt
     import nodes
     assert nodes._cell(None) == "not stated" and nodes._cell("a | b\nc") == "a / b c"
+
+
+def test_gaps_show_only_verified_evidence_sentences(offline, monkeypatch):
+    import evidence
+    import nodes
+    real = nodes._quote_verified
+    calls = {"n": 0}
+
+    def first_quote_unverified(quote, text):
+        calls["n"] += 1
+        return False if calls["n"] == 1 else real(quote, text)
+    monkeypatch.setattr(nodes, "_quote_verified", first_quote_unverified)
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5)
+    extracts = {e["paper_id"]: e for e in state["paper_extracts"]}
+    seen_none = False
+    for g in state["gap_candidates"]:
+        assert [q["id"] for q in g["evidence_quotes"]] == g["supporting_paper_ids"]
+        for q in g["evidence_quotes"]:
+            ex = extracts[q["id"]]
+            assert q["quote"] == (ex["supporting_quote"] if ex["quote_verified"] else None)
+            seen_none |= q["quote"] is None
+    report = main.render_report(state)
+    assert "Evidence sentences" in report
+    assert seen_none and evidence.NO_VERIFIED_QUOTE in report
+    assert evidence.quote_lines([{"id": "a:1", "title": "T", "year": 2024, "quote": None}]) == [f"- T (2024): _{evidence.NO_VERIFIED_QUOTE}_"]
