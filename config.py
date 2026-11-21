@@ -153,6 +153,15 @@ class Config:
     pdf_max_pages: int = _int("PDF_MAX_PAGES", 40)          # cap so one huge PDF can't stall a run
     pdf_max_download_mb: int = _int("PDF_MAX_DOWNLOAD_MB", 25)
 
+    # --- Source quality filter (Node 3, before ranking - quality.py) ---
+    # Live run 21 Nov 2026 (OpenAlex): 8 of 10 selected papers were 2026 Zenodo uploads with the same
+    # abstract. Papers whose DOI starts with one of these prefixes (Zenodo 10.5281, figshare 10.6084 -
+    # data repositories, not reviewed papers) are dropped, and of several candidates with the same
+    # abstract only the most cited one is kept. Every drop is listed in the report's Search scope.
+    exclude_doi_prefixes: tuple = tuple(p.strip().lower() for p in os.getenv(
+        "EXCLUDE_DOI_PREFIXES", "10.5281,10.6084").split("#", 1)[0].split(",") if p.strip())
+    drop_duplicate_abstracts: bool = os.getenv("DROP_DUPLICATE_ABSTRACTS", "true").strip().lower() in ("1", "true", "yes")
+
     # --- Paper-count / cost-control budget (architecture doc §7.4) ---
     # MVP scope (teacher feedback): ~20-30 candidates, of which 8-12 with enough abstract/metadata
     # are analysed. Enough for a demo, NOT a systematic review - the report says so.

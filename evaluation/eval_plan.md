@@ -39,19 +39,21 @@ Result files go to `evaluation/results/` (`.md` is committed, `.json` is git-ign
 
 | id | split | topic | years | conditions | what it tests | owner / 2nd annotator |
 |---|---|---|---|---|---|---|
-| T1 | dev | few-shot named entity recognition in low-resource languages | 2021–2026 | – | normal path; has ranking labels | A / B |
-| T2 | dev | automatic short answer grading with large language models | 2022–2026 | – | normal path; has ranking labels | B / C |
-| T3 | test | hallucination detection in retrieval-augmented generation | 2023–2026 | – | **too broad → narrow** rule | C / A |
-| T4 | test | abstractive text summarization for the Thai language | 2018–2026 | – | **too few → broaden** rule; thin evidence | A / C |
-| T5 | test | clinical named entity recognition with transformer models | 2020–2026 | include `clinical\|medical\|biomedical`, exclude `survey, review`, focus EHR / clinical notes | **user conditions**; well-defined datasets; journal DOIs | B / A |
-| T6 | test | automatic evaluation metrics for machine translation | 2021–2026 | exclude `survey` | extraction of metrics/datasets; numbers in the answer | C / B |
-| T7 | test | few-shot named entity recognition for Lao legal contracts | 2018–2026 | – | stress: almost nothing exists → stop conditions, nothing invented | anyone |
+| D1 | dev | few-shot named entity recognition in low-resource languages | 2021–2026 | – | ranking labels exist; tune here | A / B |
+| D2 | dev | automatic short answer grading with large language models | 2022–2026 | – | ranking labels exist; tune here | B / C |
+| T1 | test | LLM hallucination detection | any | – | broad area → **narrow** rule; extraction; gaps | A / C |
+| T2 | test | Thai named entity recognition | any | – | mostly abstract-only extraction; Thai qualifier kept | B / A |
+| T3 | test | retrieval-augmented generation evaluation | 2024–2026 | – | metrics extraction; numbers in the answer | C / B |
+| T4 | test | prompt injection defense for LLM agents | 2024– | – | full-text extraction; citation check | A / B |
+| T5 | test | Thai legal document summarization | any | – | **too few → broaden**; nothing passed on 21 Nov → must stay honest | anyone |
+| T6 | test | clinical named entity recognition with transformer models | 2020–2026 | include `clinical\|medical\|biomedical`, exclude `survey, review`, focus EHR / clinical notes | **user conditions** | C / A |
 
-Why these: two dev topics already have ranking labels (tune prompts/thresholds only on them); the
-five test topics each force one decision rule (narrow, broaden, conditions, stop) and differ in how
-much literature exists, so the evidence levels and the grounding check are tried on thick and thin
-evidence. Seven topics × ~10 papers ≈ 70 analysed papers — enough to compare parts of the system,
-still a small sample: report results per topic, not just one average.
+Why these: T1–T5 are the topics the group already ran on 21 Nov 2026 (`results/eval_summary_2026-11-21.md`),
+so the prepared extraction-gold and gap-rating sheets carry over; T6 is the only one that exercises the
+user conditions; D1–D2 already have ranking labels and are the only topics prompts/thresholds may be
+tuned on. The query-adaptation script keeps its own very narrow topics (Lao legal NER etc.) for the
+stop conditions. The 21 Nov runs used the old settings (3 sources, 80 candidates, 8 papers) — re-run
+T1–T6 with the frozen MVP settings before annotating; keep the old runs only as a before/after comparison.
 
 **Frozen runs:** `python evaluation/run_test_set.py` (real backend, settings in the file's
 `frozen_settings`; the script warns when `.env` differs). It saves

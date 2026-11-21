@@ -11,6 +11,7 @@ import time
 
 import conditions
 import embeddings
+import quality
 import evidence
 import links
 import llm_client
@@ -141,6 +142,10 @@ def generate_keywords(state: AgentState) -> dict:
         logger.info("Regenerating keywords (retry #%d) — avoiding %d previously tried queries",
                     state.get("retry_count", 0), len(prior))
         retry_context = prompts.RETRY_CONTEXT_TEMPLATE.format(prior_queries=prior_list)
+        # Keep only the candidates that passed the cut-off. Before, the pool kept every earlier
+        # candidate and was cut at MAX_CANDIDATE_PAPERS, so a full pool of off-topic papers left no
+        # room for the new round's results (live run 21 Nov: 0/80 passed in all 3 rounds).
+        update["candidate_papers"] = list(state.get("ranked_papers") or [])
     else:
         logger.info("Generating search keywords for topic: %r", state["research_topic"])
 
@@ -228,7 +233,11 @@ def search_sources(state: AgentState) -> dict:
 # ---------------------------------------------------------------------------
 def filter_and_rank(state: AgentState) -> dict:
     cond = state.get("search_conditions")
-    candidates, excluded = conditions.apply(state["candidate_papers"], cond)
+    candidates, low_quality = quality.apply(state["candidate_papers"])
+    if low_quality:
+        logger.info("Quality filter dropped %d/%d candidates (e.g. %s)", len(low_quality),
+                    len(state["candidate_papers"]), low_quality[0]["reason"])
+    candidates, excluded = conditions.apply(candidates, cond)
     if excluded:
         logger.info("User conditions dropped %d/%d candidates (e.g. %s)", len(excluded),
                     len(state["candidate_papers"]), excluded[0]["reason"])
@@ -250,7 +259,7 @@ def filter_and_rank(state: AgentState) -> dict:
     rounds[-1].update({"n_passed_cutoff": len(above_threshold), "n_selected": len(selected),
                        "n_excluded_by_conditions": len(excluded)})
     return {"ranked_papers": above_threshold, "selected_papers": selected, "search_rounds": rounds,
-            "excluded_by_conditions": excluded}
+            "excluded_by_conditions": excluded, "excluded_by_quality": low_quality}
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +279,8 @@ def check_sufficiency(state: AgentState) -> dict:
     narrow_count = state.get("narrow_count", 0)
     n_selected = len(state.get("selected_papers", []))
     n_candidates = len(state.get("candidate_papers") or [])
-    n_after_conditions = n_candidates - len(state.get("excluded_by_conditions") or [])
+    n_after_conditions = (n_candidates - len(state.get("excluded_by_conditions") or [])
+                          - len(state.get("excluded_by_quality") or []))
     n_passed = len(state.get("ranked_papers") or [])
     pass_rate = n_passed / n_after_conditions if n_after_conditions else 0.0
     # Live-run bug: with --max-papers 4 and MIN_PAPERS_BEFORE_RETRY=5 the check could never pass,

@@ -8,3 +8,4 @@ rag_store/
 _live_test/
 evaluation/results/*.json
 .pytest_cache/
+evaluation/results/logs/

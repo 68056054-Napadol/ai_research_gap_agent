@@ -1,5 +1,5 @@
 {
-  "_note": "Fixed test set for evaluation (evaluation/eval_plan.md §0). Chosen BEFORE looking at results. 'dev' topics may be used to tune prompts and thresholds; 'test' topics are held out: run them once with the frozen settings, annotate, and report - do not tune on them. Each topic is run once by evaluation/run_test_set.py; every annotator works from that saved run, so everyone judges the same papers.",
+  "_note": "Fixed test set for evaluation (evaluation/eval_plan.md §0). T1-T5 are the topics the group already ran on 21 Nov 2026 (evaluation/results/eval_summary_2026-11-21.md) - kept so the prepared extraction-gold and gap-rating sheets stay comparable; T6 adds a topic that exercises the user conditions. D1-D2 are dev topics (they have ranking labels): tune prompts and thresholds only on them. Run each topic once with the frozen settings (evaluation/run_test_set.py) and have every annotator work from that saved run.",
   "frozen_settings": {
     "ENABLED_SOURCES": "openalex",
     "MAX_CANDIDATE_PAPERS": 30,
@@ -12,76 +12,162 @@
   },
   "topics": [
     {
-      "id": "T1",
+      "id": "D1",
       "split": "dev",
       "topic": "few-shot named entity recognition in low-resource languages",
-      "year_from": 2021, "year_to": 2026,
-      "conditions": {"focus": "", "include": "", "exclude": ""},
-      "expected_path": "normal (enough papers on the first round)",
-      "tests": ["retrieval & ranking (already has ranking labels)", "extraction", "gap quality"],
-      "owner": "A", "second_annotator": "B"
+      "year_from": 2021,
+      "year_to": 2026,
+      "conditions": {
+        "focus": "",
+        "include": "",
+        "exclude": ""
+      },
+      "expected_path": "normal",
+      "tests": [
+        "retrieval & ranking (has ranking labels)",
+        "prompt tuning"
+      ],
+      "owner": "A",
+      "second_annotator": "B"
+    },
+    {
+      "id": "D2",
+      "split": "dev",
+      "topic": "automatic short answer grading with large language models",
+      "year_from": 2022,
+      "year_to": 2026,
+      "conditions": {
+        "focus": "",
+        "include": "",
+        "exclude": ""
+      },
+      "expected_path": "normal",
+      "tests": [
+        "retrieval & ranking (has ranking labels)",
+        "prompt tuning"
+      ],
+      "owner": "B",
+      "second_annotator": "C"
+    },
+    {
+      "id": "T1",
+      "split": "test",
+      "topic": "LLM hallucination detection",
+      "year_from": null,
+      "year_to": null,
+      "conditions": {
+        "focus": "",
+        "include": "",
+        "exclude": ""
+      },
+      "expected_path": "broad area - may trigger the narrow rule",
+      "tests": [
+        "query adaptation: narrow rule",
+        "extraction",
+        "gap quality"
+      ],
+      "owner": "A",
+      "second_annotator": "C"
     },
     {
       "id": "T2",
-      "split": "dev",
-      "topic": "automatic short answer grading with large language models",
-      "year_from": 2022, "year_to": 2026,
-      "conditions": {"focus": "", "include": "", "exclude": ""},
-      "expected_path": "normal",
-      "tests": ["retrieval & ranking (already has ranking labels)", "extraction", "gap quality"],
-      "owner": "B", "second_annotator": "C"
+      "split": "test",
+      "topic": "Thai named entity recognition",
+      "year_from": null,
+      "year_to": null,
+      "conditions": {
+        "focus": "",
+        "include": "",
+        "exclude": ""
+      },
+      "expected_path": "normal; few full-text PDFs (2/7 on 21 Nov)",
+      "tests": [
+        "extraction from abstracts",
+        "gap quality",
+        "Thai-specific qualifier kept"
+      ],
+      "owner": "B",
+      "second_annotator": "A"
     },
     {
       "id": "T3",
       "split": "test",
-      "topic": "hallucination detection in retrieval-augmented generation",
-      "year_from": 2023, "year_to": 2026,
-      "conditions": {"focus": "", "include": "", "exclude": ""},
-      "expected_path": "too broad -> one narrow round (a very active area: many loosely related LLM papers)",
-      "tests": ["query adaptation: narrow rule", "ranking precision after narrowing", "citation check (mostly arXiv-era DOIs)"],
-      "owner": "C", "second_annotator": "A"
+      "topic": "retrieval-augmented generation evaluation",
+      "year_from": 2024,
+      "year_to": 2026,
+      "conditions": {
+        "focus": "",
+        "include": "",
+        "exclude": ""
+      },
+      "expected_path": "normal",
+      "tests": [
+        "extraction (metrics)",
+        "grounding of numbers",
+        "gap quality"
+      ],
+      "owner": "C",
+      "second_annotator": "B"
     },
     {
       "id": "T4",
       "split": "test",
-      "topic": "abstractive text summarization for the Thai language",
-      "year_from": 2018, "year_to": 2026,
-      "conditions": {"focus": "", "include": "", "exclude": ""},
-      "expected_path": "too few -> broaden rounds (few Thai-specific papers)",
-      "tests": ["query adaptation: broaden rule", "honest scope when few papers exist (expect Limited/Moderate evidence)"],
-      "owner": "A", "second_annotator": "C"
+      "topic": "prompt injection defense for LLM agents",
+      "year_from": 2024,
+      "year_to": null,
+      "conditions": {
+        "focus": "",
+        "include": "",
+        "exclude": ""
+      },
+      "expected_path": "normal; full text for all papers on 21 Nov",
+      "tests": [
+        "extraction from full text",
+        "citation check",
+        "gap quality"
+      ],
+      "owner": "A",
+      "second_annotator": "B"
     },
     {
       "id": "T5",
       "split": "test",
-      "topic": "clinical named entity recognition with transformer models",
-      "year_from": 2020, "year_to": 2026,
-      "conditions": {"focus": "electronic health records and clinical notes",
-                     "include": "clinical|medical|biomedical",
-                     "exclude": "survey, review"},
-      "expected_path": "normal, with papers dropped by the user conditions",
-      "tests": ["user conditions: include/exclude filtering is correct", "extraction (datasets are well defined, e.g. i2b2/n2c2)", "citation check (journal DOIs)"],
-      "owner": "B", "second_annotator": "A"
+      "topic": "Thai legal document summarization",
+      "year_from": null,
+      "year_to": null,
+      "conditions": {
+        "focus": "",
+        "include": "",
+        "exclude": ""
+      },
+      "expected_path": "too few -> broaden rounds; 0 papers passed on 21 Nov - must end Limited / no gaps and say why",
+      "tests": [
+        "query adaptation: broaden rule + pool fix",
+        "stop conditions",
+        "no invented papers when evidence is thin"
+      ],
+      "owner": "any",
+      "second_annotator": "-"
     },
     {
       "id": "T6",
       "split": "test",
-      "topic": "automatic evaluation metrics for machine translation",
-      "year_from": 2021, "year_to": 2026,
-      "conditions": {"focus": "", "include": "", "exclude": "survey"},
-      "expected_path": "normal",
-      "tests": ["extraction (metrics and WMT datasets are explicit)", "grounding of numbers in the answer", "gap quality"],
-      "owner": "C", "second_annotator": "B"
-    },
-    {
-      "id": "T7",
-      "split": "test",
-      "topic": "few-shot named entity recognition for Lao legal contracts",
-      "year_from": 2018, "year_to": 2026,
-      "conditions": {"focus": "", "include": "", "exclude": ""},
-      "expected_path": "stress: almost no papers -> retries hit MAX_RETRY_LOOPS, answer must stay Limited and say why",
-      "tests": ["stop conditions", "no invented papers/results when evidence is thin (grounding)"],
-      "owner": "any", "second_annotator": "-"
+      "topic": "clinical named entity recognition with transformer models",
+      "year_from": 2020,
+      "year_to": 2026,
+      "conditions": {
+        "focus": "electronic health records and clinical notes",
+        "include": "clinical|medical|biomedical",
+        "exclude": "survey, review"
+      },
+      "expected_path": "normal, with papers dropped by the user conditions",
+      "tests": [
+        "user conditions: include/exclude filtering is correct",
+        "extraction (i2b2/n2c2 datasets)",
+        "citation check (journal DOIs)"
+      ],
+      "owner": "C",
+      "second_annotator": "A"
     }
   ]
 }

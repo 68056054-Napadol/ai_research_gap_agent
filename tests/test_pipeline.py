@@ -1327,3 +1327,27 @@ def test_grounding_flags_invented_references_numbers_and_names(offline, tmp_path
         csv.writer(f).writerows(rows)
     score = eg.score_audit(str(sheet))
     assert score["n_labelled"] == n and score["unsupported_rate"] == round(1 / n, 3)
+
+
+def test_retry_rounds_make_room_for_new_candidates(offline, monkeypatch):
+    """Live run 21 Nov: a full pool of off-topic candidates was kept across retries and the cap cut
+    every new result. A broaden (or narrow) round now keeps only the candidates that passed."""
+    import nodes
+    off_topic = [{"id": f"x:{i}", "title": f"Off topic {i}", "abstract": "crop yield"} for i in range(30)]
+    st = {"research_topic": "t", "prior_queries_tried": ["q"], "search_verdict": "too_few", "retry_count": 1,
+          "candidate_papers": off_topic, "ranked_papers": off_topic[:2], "search_rounds": [{"round": 1}]}
+    out = nodes.generate_keywords(st)
+    assert out["candidate_papers"] == off_topic[:2]
+
+
+def test_quality_filter_drops_upload_repositories_and_copies():
+    import quality
+    same = "Cross-lingual Named Entity Recognition leverages knowledge transfer between languages " * 3
+    papers = [{"id": "a", "title": "Copy 1", "doi": "10.5281/zenodo.1", "abstract": same, "citation_count": 0},
+              {"id": "b", "title": "Real", "doi": "10.18653/v1/x", "abstract": same, "citation_count": 9},
+              {"id": "c", "title": "Copy 2", "doi": None, "abstract": same, "citation_count": 0},
+              {"id": "d", "title": "Other", "doi": "10.1/y", "abstract": "short", "citation_count": 0}]
+    kept, dropped = quality.apply(papers)
+    assert [p["id"] for p in kept] == ["b", "d"]
+    reasons = {d["id"]: d["reason"] for d in dropped}
+    assert "10.5281" in reasons["a"] and reasons["c"] == "same abstract as b"

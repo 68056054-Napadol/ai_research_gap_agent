@@ -58,6 +58,7 @@ def search_scope(state: dict) -> dict:
         "skipped_papers": list(state.get("skipped_papers") or []),
         "conditions": state.get("search_conditions") or {},
         "excluded_by_conditions": list(state.get("excluded_by_conditions") or []),
+        "excluded_by_quality": list(state.get("excluded_by_quality") or []),
         "narrow_loops": state.get("narrow_count", 0),
         "rounds": [{"round": r.get("round"), "mode": r.get("mode", "initial"), "verdict": r.get("verdict")}
                    for r in state.get("search_rounds") or []],
@@ -123,6 +124,10 @@ def search_scope_lines(scope: dict) -> list:
         f"- **Skipped papers ({len(skipped)}):** "
         + ("; ".join(f"{s.get('title') or s.get('id')} (`{s.get('id')}`) - {s.get('reason')}" for s in skipped) or "none"),
     ]
+    lowq = scope.get("excluded_by_quality") or []
+    lines.insert(len(lines) - 1, f"- **Dropped by the quality filter ({len(lowq)}):** "
+                 + ("; ".join(f"{e.get('title') or e.get('id')} ({e.get('reason')})" for e in lowq[:8])
+                    + (" …" if len(lowq) > 8 else "") if lowq else "none"))
     if scope.get("analysis_basis"):
         lines.insert(4, f"- **Analysed from:** {scope['analysis_basis']}")
     lines.insert(1, "- **User conditions:** " + (" · ".join(cond_lines) if cond_lines else "none")

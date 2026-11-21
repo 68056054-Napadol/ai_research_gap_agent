@@ -95,6 +95,7 @@ class AgentState(TypedDict, total=False):
     search_verdict: str         # "sufficient" | "too_few" | "too_broad" - nodes.check_sufficiency
     last_round_scope: dict      # {n_candidates, n_passed, pass_rate} of the last round (for the narrow prompt)
     excluded_by_conditions: list  # [{id, title, reason}] candidates dropped by the user's include/exclude terms
+    excluded_by_quality: list   # [{id, title, reason}] candidates dropped by quality.apply (upload repositories, copies)
 
     # --- Node 5 ---
     paper_extracts: list        # list[PaperExtract]
