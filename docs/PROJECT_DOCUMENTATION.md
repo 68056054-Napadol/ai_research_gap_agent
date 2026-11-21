@@ -1,8 +1,8 @@
 # AI Research Gap Agent — เอกสารอธิบายโปรเจกต์
 
-2026-11-20
+2026-11-20 (ตรวจทานและอัปเดต 2026-11-21)
 
-ทุกข้อมูลในเอกสารนี้อ้างอิงจากโค้ดในโฟลเดอร์ D:\NLP_mini_project\ai_research_gap_agent (branch `main` ที่ commit `801553a`) และจากการรันแอปจริง ฉบับนี้อัปเดตหลังปรับระบบตาม feedback ของอาจารย์ (ดูหัวข้อ 9)
+ทุกข้อมูลในเอกสารนี้อ้างอิงจากโค้ดในโฟลเดอร์ D:\NLP_mini_project\ai_research_gap_agent (branch `main` โค้ดล่าสุดคือ commit `801553a` ไม่มีการแก้โค้ดหลังจากนั้น) และจากการรันแอปจริง ฉบับนี้อัปเดตหลังปรับระบบตาม feedback ของอาจารย์ (ดูหัวข้อ 9) การตรวจทานวันที่ 2026-11-21 เทียบเลขบรรทัดและตัวเลขทุกจุดกับโค้ดและไฟล์ใน `output/` อีกครั้ง แก้จุดที่ผิด และเพิ่มผลจาก run วันที่ 21 พ.ย. (หัวข้อ 7.2 และ 8.3)
 
 ## 1. ภาพรวมโปรเจกต์
 
@@ -15,7 +15,7 @@
 | แหล่งเปเปอร์      | Semantic Scholar, arXiv, OpenAlex (+ PDF open-access)                                       | sources/semantic_scholar.py, arxiv.py, openalex.py, pdf_extract.py     |
 | Orchestration   | LangGraph `StateGraph` 9 nodes                                                              | graph.py                                                               |
 | LLM             | 2 backend: cloud (Anthropic) / local (Ollama) แบ่งเป็น tier fast/strong                       | llm_client.py, .env.example                                            |
-| ค่าที่ใช้จริงในเครื่อง | `LLM_BACKEND=local`, qwen3:14b ทั้ง fast และ strong, Langfuse ที่ `http://localhost:3000`       | .env (บรรทัด 2, 74), output/20261119_210348_state.json `run_info`       |
+| ค่าที่ใช้จริงในเครื่อง | `LLM_BACKEND=local`, qwen3:14b ทั้ง fast และ strong, Langfuse ที่ `http://localhost:3000`       | .env (บรรทัด 2, 11-12, 75), output/20261119_210348_state.json `run_info`       |
 | UI              | Streamlit 2 หน้า: Run agent และ Dashboard                                                    | app.py:276, dashboard_page.py                                          |
 | Observability   | Langfuse (optional, ปิดอัตโนมัติถ้าไม่มี key)                                                      | tracing.py, outbound.py                                                |
 
@@ -143,7 +143,7 @@ def _quote_verified(quote: str, source_text: str) -> bool:
 | Agent                   | Tool                  | Arguments ที่ LLM เลือก                        | Contract                                   |
 |-------------------------|-----------------------|---------------------------------------------|--------------------------------------------|
 | search agent (node 2)   | `search_papers`       | query, source, year_from, year_to, limit    | `SearchPapersArgs` (contracts.py:162)      |
-| verifier agent (node 7) | `get_paper_text`      | paper_id, max_chars                         | `GetPaperTextArgs` (contracts.py:176)      |
+| verifier agent (node 7) | `get_paper_text`      | paper_id (ความยาวข้อความที่คืนให้ harness กำหนดเองที่ `VERIFIER_TEXT_CHARS`=3000, LLM เลือกไม่ได้) | `GetPaperTextArgs` (contracts.py:176)      |
 | verifier agent (node 7) | `search_paper_chunks` | paper_id, query, k                          | `SearchPaperChunksArgs` (contracts.py:184) |
 | verifier agent (node 7) | `search_corpus`       | query, k, scope (this_run / knowledge_base) | `SearchCorpusArgs` (contracts.py:190)      |
 
@@ -185,17 +185,19 @@ LLM ทำหน้าที่แค่ "สกัด" entity ที่อา�
 | input_action  | I3  | redact ข้อมูลติดต่อ ≥ 1 → PROCEED_REDACTED                   |
 | input_action  | I4  | ไม่พบอะไร → PROCEED                                       |
 
-Privacy ทำงาน 3 ช่องทาง: หัวข้อที่ผู้ใช้พิมพ์ (node 0), title/abstract/เนื้อหา PDF ก่อน LLM หรือ UI เห็น (search tool + node 5) และคำตอบสุดท้าย (node 8) เปเปอร์เก็บเฉพาะ `n_authors` ไม่เก็บชื่อผู้แต่ง ใน run ที่รันจริงครั้งนี้ decision model redact ชื่อ cited_author 3 รายการจาก abstract (ดูรูปในหัวข้อ 7)
+Privacy ทำงาน 3 ช่องทาง: หัวข้อที่ผู้ใช้พิมพ์ (node 0), title/abstract/เนื้อหา PDF ก่อน LLM หรือ UI เห็น (search tool + node 5) และคำตอบสุดท้าย (node 8) เปเปอร์เก็บเฉพาะ `n_authors` ไม่เก็บชื่อผู้แต่ง ใน run 2026-11-20 19:24 ที่ใช้ถ่ายรูป decision model ตัดสิน 38 รายการ ทั้งหมดอยู่ในช่องทาง paper_text: R3 redact ชื่อผู้แต่ง `[AUTHOR]` 35 รายการ และ R4 redact `[CITED_AUTHOR]` 3 รายการ (ดูรูป 7-7)
 
 ### 5.2 RAG knowledge base (rag_store.py)
 
-เก็บเฉพาะเปเปอร์ที่ถูกเลือกวิเคราะห์เชิงลึก ตัดเนื้อหาตาม section (`_SECTION_RULES`, rag_store.py:38) และไม่ index ส่วน references/acknowledgements (`_SKIP_SECTIONS`, rag_store.py:51) เก็บใน SQLite สองตาราง `papers` และ `chunks` (rag_store.py:99-110) ค้นด้วย cosine แบบ exact ผ่าน numpy เนื้อหาที่เก็บผ่านการ redact แล้ว
+เก็บเฉพาะเปเปอร์ที่ถูกเลือกวิเคราะห์เชิงลึก ตัดเนื้อหาตาม section (`_SECTION_RULES`, rag_store.py:38) และไม่ index ส่วน references/acknowledgements (`_SKIP_SECTIONS`, rag_store.py:51) เก็บใน SQLite สามตาราง `papers`, `chunks` และ `extracts` (cache ผล extraction) (rag_store.py:106-113) ค้นด้วย cosine แบบ exact ผ่าน numpy เนื้อหาที่เก็บผ่านการ redact แล้ว
 
 ผลจริงจาก run 2026-11-20 01:11 (`knowledge_base` ใน state JSON): 59 เปเปอร์ (full text 48), 2,323 chunks, extraction ที่ cache ไว้ 46 รายการ, embedding `ollama:embeddinggemma:300m` ใน run นี้ extraction ทั้ง 8 เปเปอร์ใช้จาก cache (`extract_cache_hits: 8`)
 
+KB โตขึ้นตามจำนวน run: หลัง run 2026-11-20 19:24 มี 70 เปเปอร์ (full text 53), 2,636 chunks, cache 74 รายการ และหลัง run ล่าสุด 2026-11-21 13:25 (`output/20261121_133211_state.json`) มี 87 เปเปอร์ (full text 63), 3,143 chunks, cache 86 รายการ
+
 ## 6. การเชื่อมต่อ Langfuse
 
-ทุกครั้งที่รัน agent จะกลายเป็น 1 trace ชื่อ `research-gap-agent-run` บน Langfuse self-hosted ที่ `http://localhost:3000` (`.env` บรรทัด 74) โค้ดอยู่ใน tracing.py และปิดตัวเอง (no-op) ถ้าไม่มี `LANGFUSE_PUBLIC_KEY` และ `LANGFUSE_SECRET_KEY` ดังนั้น agent ไม่พึ่ง Langfuse
+ทุกครั้งที่รัน agent จะกลายเป็น 1 trace ชื่อ `research-gap-agent-run` บน Langfuse self-hosted ที่ `http://localhost:3000` (`.env` บรรทัด 75) โค้ดอยู่ใน tracing.py และปิดตัวเอง (no-op) ถ้าไม่มี `LANGFUSE_PUBLIC_KEY` และ `LANGFUSE_SECRET_KEY` ดังนั้น agent ไม่พึ่ง Langfuse
 
 ### 6.1 การตั้งค่าและสร้าง client
 
@@ -331,13 +333,15 @@ Output ระดับ trace (tracing.py:255-268) บันทึก `final_answ
 
 ### 7.2 หน้า Dashboard
 
-Dashboard อ่านทุก run ที่บันทึกใน `output/` (dashboard.py สำหรับข้อมูล, dashboard_page.py สำหรับหน้า) หัวหน้าใช้คำ Potential Research Gaps และมีประโยคข้อจำกัด run เก่าที่มีแต่คะแนน 0–100 จะคำนวณระดับหลักฐานใหม่จากข้อมูลที่เก็บไว้ ค่า KPI ตอนถ่ายรูป: Runs 29, Topics 9, Papers analysed 183, Gaps 95, Supported 66, Refuted 8, Strong evidence 0, Limited evidence 22
+Dashboard อ่านทุก run ที่บันทึกใน `output/` (dashboard.py สำหรับข้อมูล, dashboard_page.py สำหรับหน้า) หัวหน้าใช้คำ Potential Research Gaps และมีประโยคข้อจำกัด run เก่าที่มีแต่คะแนน 0–100 จะคำนวณระดับหลักฐานใหม่จากข้อมูลที่เก็บไว้ ค่า KPI ตอนถ่ายรูป (คำนวณซ้ำด้วย `dashboard.summary` จาก state 31 ไฟล์ที่มีก่อน 2026-11-20 20:00 ได้ค่าเดียวกัน): Runs 29, Topics 9, Papers analysed 183, Gaps 95, Supported 66, Refuted 8, Strong evidence 0, Limited evidence 22
+
+ค่า ณ 2026-11-21 13:32 (state 35 ไฟล์ รวม run หัวข้อราคาทอง/XAUUSD 4 run ของวันที่ 21): Runs 32, Topics 12, Papers analysed 189, Gaps 98, Supported 68, Refuted 9, Strong evidence 0, Moderate 75, Limited evidence 23 ถ้าเปิด Dashboard ตอนนี้จะเห็นตัวเลขชุดนี้ ไม่ใช่ชุดในรูป
 
 รูป 7-8: KPI, กราฟ Gaps by category และ Evidence level by verdict, ตาราง All potential research gaps
 
 ![Dashboard](images/08_dashboard.jpg)
 
-สังเกตว่าใน 95 gaps ไม่มีข้อไหนได้ Strong เลย เพราะ Strong ต้องมี paper สนับสนุน ≥ 3 และต้องไม่ติด cap ที่ต้องวิเคราะห์ครบ ≥ 8 paper ขณะที่ gap ส่วนใหญ่อ้าง 2 paper และหลาย run มี paper ที่ถูกข้าม จึงวิเคราะห์ได้ไม่ถึง 8 เกณฑ์เข้มตามที่ตั้งใจ แต่ถ้าต้องการให้มี Strong เกิดขึ้นได้จริง ต้องเพิ่ม Papers to deep-analyze หรือปรับเกณฑ์ใน .env
+สังเกตว่าใน 95 gaps (และ 98 gaps ณ 21 พ.ย.) ไม่มีข้อไหนได้ Strong เลย เพราะ Strong ต้องมี paper สนับสนุน ≥ 3 และต้องไม่ติด cap ที่ต้องวิเคราะห์ครบ ≥ 8 paper ขณะที่ gap ส่วนใหญ่อ้าง 2 paper และหลาย run มี paper ที่ถูกข้าม จึงวิเคราะห์ได้ไม่ถึง 8 เกณฑ์เข้มตามที่ตั้งใจ แต่ถ้าต้องการให้มี Strong เกิดขึ้นได้จริง ต้องเพิ่ม Papers to deep-analyze หรือปรับเกณฑ์ใน .env
 
 ## 8. ผลการประเมิน, วิธีรัน และข้อสังเกต
 
@@ -389,11 +393,17 @@ Dashboard อ่านทุก run ที่บันทึกใน `output/` 
 
 - Semantic Scholar เคยตอบ 403 ใน run 2026-11-20 01:11 แต่ใน run 13:10 ตอบปกติ ครั้งนั้น arXiv โดน 429 แทน ระบบปิดแหล่งที่ล้มและแสดงใน Search scope ทุกครั้ง
 
-- Bug เล็ก: ในรายงาน run 13:10 ส่วน "Papers analyzed" แสดง 8 เรื่อง รวมเรื่องที่ถูกข้าม ขณะที่ Search scope บอกว่าวิเคราะห์ 7 เรื่อง
+- Bug เล็ก (ยังไม่ได้แก้): ส่วน "Papers analyzed" วนจาก `selected_papers` ทั้งในรายงาน (main.py:32) และ UI (app.py:596-597) จึงนับรวมเรื่องที่ถูกข้าม เช่น run 13:10 แสดง 8 เรื่อง (selected 8, extract 7, ข้าม 1) ขณะที่ Search scope บอกว่าวิเคราะห์ 7 เรื่อง และ run 19:24 แสดง 8 ทั้งที่วิเคราะห์ได้ 6
 
 - คะแนน 0–100 แบบเดิมยังอยู่ใน state (`TODO(Member C)` ยังไม่ calibrate) แต่ไม่ได้ใช้ตัดสินระดับหลักฐานแล้ว
 
-- ไม่ได้รัน pytest ในการเขียนเอกสารนี้ tests/test_pipeline.py มีฟังก์ชัน `def test_` 73 ตัว (นับด้วย grep)
+- รัน `python -m pytest -q tests` เมื่อ 2026-11-21 (สำเนาโค้ดบน Linux, Python 3.10): 102 passed ตรงกับที่ README บอก tests/test_pipeline.py มีฟังก์ชัน `def test_` 73 ตัว ส่วนที่เหลือมาจาก test ที่ parametrize
+
+- ข้อสังเกตใหม่จาก run วันที่ 2026-11-21 (โค้ดเดิม commit `801553a`):
+  - หัวข้อภาษาไทย "วิทยาการข้อมูลเกี่ยวกับราคาทองและข้อมูลอนุกรมเวลา" (`20261121_111832`): LLM สร้างคำค้นเป็นภาษาไทยทั้ง 5 คำ แหล่งทั้ง 3 คืน 0 ผล retry ครบ 3 รอบ (ลองคำค้น 15 คำ) แล้วจบโดยไม่มี paper และไม่มี gap เพราะ `KEYWORD_GEN_PROMPT` ไม่ได้สั่งให้สร้างคำค้นภาษาอังกฤษ ถ้าต้องการรองรับหัวข้อภาษาไทย ควรสั่งใน prompt ให้คำค้นเป็นภาษาอังกฤษ
+  - หัวข้อ "find best strategy for XAUUSD trading" (`20261121_133211`): ได้ candidate 80 แต่ผ่าน cut-off แค่ 2 retry ครบ 3 รอบ สกัดได้ 1 เรื่อง (อีก 1 เรื่อง LLMError) จึงไม่มี gap เลย เป็นตัวอย่างจริงของกฎ retry และการหยุดที่ `MAX_RETRY_LOOPS`
+  - หัวข้อ "gold price forecast in Fx for day trader" (`20261121_113724`): เลือก 8 เรื่อง แต่ extraction ล้ม (LLMError) 3 เรื่อง เหลือ 5 ได้ gap 3 ข้อ (Moderate 2, Limited 1) ปัญหา extraction ล้มของ qwen3:14b จึงยังเกิดซ้ำ
+  - หัวข้อที่ถูก REJECT 1 run (`20261121_112036`) เป็นไปตามกฎ I1
 
 ### 8.4 แหล่งอ้างอิง
 
@@ -401,11 +411,11 @@ Dashboard อ่านทุก run ที่บันทึกใน `output/` 
 
 - เอกสารประกอบในโปรเจกต์: README.md, .env.example, requirements.txt, evaluation/eval_plan.md, evaluation/results/\*.md
 
-- ผลการรันจริง: ดูหัวข้อ 7 (ไฟล์ state JSON ของ run ที่ถ่ายรูป) และ `output/20261120_131034_report.md`
+- ผลการรันจริง: ดูหัวข้อ 7 (ไฟล์ state JSON ของ run ที่ถ่ายรูป), `output/20261120_131034_report.md` และ state ของ run วันที่ 2026-11-21 (หัวข้อ 8.3)
 
 - Feedback ของอาจารย์และข้อเสนอโครงการ (ไฟล์ที่ผู้ใช้แนบมา)
 
-- ไม่ได้อ่าน: docs/AI_Research_Assistant_Agent_Architecture.docx และ docs/NLP_AI Research Assistant Agent.pdf
+- docs/AI_Research_Assistant_Agent_Architecture.docx เป็นเอกสารออกแบบฉบับแรก (ส.ค. 2026) ปรับปรุงเมื่อ 2026-11-21 ให้ตรงกับระบบปัจจุบัน และ docs/NLP_AI Research Assistant Agent.pdf เป็นข้อเสนอโครงการที่ส่งอาจารย์ คงไว้ตามต้นฉบับ
 
 ## 9. เทียบ feedback ของอาจารย์กับสิ่งที่ทำแล้ว
 

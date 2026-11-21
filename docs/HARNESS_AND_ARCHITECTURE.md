@@ -1,8 +1,8 @@
 # AI Research Gap Agent — Harness, Tool Calling, Policy, Contract, KM, Decision Model และ Langfuse
 
-2026-11-20
+2026-11-20 (ตรวจทาน 2026-11-21)
 
-ภาพโค้ดทุกภาพ render จากไฟล์จริงใน D:\NLP_mini_project\ai_research_gap_agent (branch main, commit 801553a) เลขบรรทัดทางซ้ายคือเลขบรรทัดจริงในไฟล์ บรรทัดที่ยาวเกิน 110 ตัวอักษรถูกตัดท้ายด้วย … ส่วนภาพหน้าจอถ่ายจาก run จริงเมื่อ 2026-11-20 19:24
+ภาพโค้ดทุกภาพ render จากไฟล์จริงใน D:\NLP_mini_project\ai_research_gap_agent (branch main, commit 801553a ซึ่งยังเป็นโค้ดล่าสุด ตรวจเลขบรรทัดในภาพกับโค้ดปัจจุบันแล้วเมื่อ 2026-11-21) เลขบรรทัดทางซ้ายคือเลขบรรทัดจริงในไฟล์ บรรทัดที่ยาวเกิน 110 ตัวอักษรถูกตัดท้ายด้วย … ส่วนภาพหน้าจอถ่ายจาก run จริงเมื่อ 2026-11-20 19:24
 
 ## 1. Harness ทั้งหมดในโปรเจกต์
 
@@ -226,17 +226,17 @@ Harness ในโปรเจกต์นี้คือโค้ดที่ห
 
 | Policy                                                | บังคับที่                                                        | เมื่อฝ่าฝืน                                                     |
 |-------------------------------------------------------|--------------------------------------------------------------|-------------------------------------------------------------|
-| ใช้ได้เฉพาะแหล่งที่เปิดใน sidebar                           | tools.py:170-175                                             | คืน error "source ... is disabled for this run" ให้ LLM       |
-| ปีต้องอยู่ในช่วงที่ผู้ใช้เลือก                                   | tools.py:176-182                                             | clamp แล้วบอกใน `policy_notes`                               |
-| งบ `search_papers` ต่อรอบ (`MAX_SEARCH_TOOL_CALLS`=10) | tools.py:165-166                                             | คืน "search budget ... is used up"                           |
-| ลบ placeholder ของข้อมูลส่วนบุคคลออกจากคำค้น               | tools.py:184-188                                             | ตัดออกและบอกใน `policy_notes`                                |
-| Verifier อ่านได้เฉพาะ paper ที่วิเคราะห์แล้ว                 | `VerifierToolContext._unknown` (tools.py)                    | คืน "not among the analyzed papers (it may be a made-up id)" |
-| ปริมาณข้อความที่คืนให้ verifier เป็นการตัดสินของ harness       | `VERIFIER_TEXT_CHARS`=3000 (config.py), contracts.py:177-180 | LLM ส่ง max_chars ไม่ได้                                       |
+| ใช้ได้เฉพาะแหล่งที่เปิดใน sidebar                           | tools.py:171-176                                             | คืน error "source ... is disabled for this run" ให้ LLM       |
+| ปีต้องอยู่ในช่วงที่ผู้ใช้เลือก                                   | tools.py:177-183                                             | clamp แล้วบอกใน `policy_notes`                               |
+| งบ `search_papers` ต่อรอบ (`MAX_SEARCH_TOOL_CALLS`=10) | tools.py:166-167                                             | คืน "search budget ... is used up"                           |
+| ลบ placeholder ของข้อมูลส่วนบุคคลออกจากคำค้น               | tools.py:185-189                                             | ตัดออกและบอกใน `policy_notes`                                |
+| Verifier อ่านได้เฉพาะ paper ที่วิเคราะห์แล้ว                 | `VerifierToolContext._unknown` (tools.py:255)                | คืน "not among the analyzed papers (it may be a made-up id)" |
+| ปริมาณข้อความที่คืนให้ verifier เป็นการตัดสินของ harness       | `VERIFIER_TEXT_CHARS`=3000 (config.py:89), contracts.py:177-180 | LLM ส่ง max_chars ไม่ได้                                       |
 | จำกัดรอบและ token                                      | `MAX_TOOL_STEPS`, `MAX_RETRY_LOOPS`, `MAX_RUN_TOKENS`        | บังคับตอบ / หยุด retry                                         |
 | Privacy policy                                        | decision model `entity_action`, `input_action` (หัวข้อ 10)     | REDACT หรือ REJECT                                           |
 | Outbound policy: ไม่ให้ PII หรือ API key ออกจากโปรเซส    | `outbound.enforce` (outbound.py:53)                          | redact และนับ `outbound_pii_violations`                      |
 
-ทุกครั้งที่ policy เปลี่ยน argument จะมี `policy_notes` แนบไปใน context ที่ LLM เห็น และอยู่ใน `tool_trace` ด้วย (ใน run 19:24 ไม่มี note เพราะ argument ทุกตัวอยู่ในกรอบอยู่แล้ว) ถ้าจะย้ายไปใช้ OPA จุดที่เหมาะคือกฎใน `SearchToolContext.execute` เพราะเป็น allow/deny ต่อ tool call อยู่แล้ว
+ทุกครั้งที่ policy เปลี่ยน argument จะมี `policy_notes` แนบไปใน context ที่ LLM เห็น และอยู่ใน `tool_trace` ด้วย (ใน run 19:24 ไม่มี note เพราะ argument ทุกตัวอยู่ในกรอบอยู่แล้ว: `tool_args_valid_rate` = 1.0, `tool_args_repaired_rate` = 0.0) ถ้าจะย้ายไปใช้ OPA จุดที่เหมาะคือกฎใน `SearchToolContext.execute` เพราะเป็น allow/deny ต่อ tool call อยู่แล้ว
 
 รูป 6-1: policy ใน executor ของ `search_papers` (tools.py:159-182)
 
@@ -320,7 +320,7 @@ KM ของโปรเจกต์คือ knowledge base ที่เก็�
 | ผู้ใช้ KM               | node 5 (ดึง chunk method/dataset/results/limitations), tool `search_paper_chunks` และ `search_corpus` ของ verifier | ให้ extraction อ่านส่วนท้าย paper ได้ และให้ verifier หา counterexample                                          |
 | Embedding            | `RAG_EMBEDDING` (ในเครื่อง: `ollama:embeddinggemma:300m`)                                                           | เลือกจาก compare_embeddings: hit@3 EN 0.88 / TH 0.76                                                        |
 
-สถานะจริงหลัง run 19:24 (`knowledge_base` ใน state JSON): 70 papers (full text 53), 2,636 chunks, extraction ที่ cache 74 รายการ run นี้ค้น KM 39 ครั้ง (`rag_searches`) และนำ paper ที่ index แล้วกลับมาใช้ 8 เรื่อง
+สถานะจริงหลัง run 19:24 (`knowledge_base` ใน state JSON): 70 papers (full text 53), 2,636 chunks, extraction ที่ cache 74 รายการ run นี้ค้น KM 39 ครั้ง (`rag_searches`) และนำ paper ที่ index แล้วกลับมาใช้ 8 เรื่อง (+ full text ที่ใช้ซ้ำ 7 รวมเป็น "reused 15" ในรูป 4-6) หลัง run ล่าสุด 2026-11-21 13:25 KM มี 87 papers (full text 63), 3,143 chunks, cache 86 รายการ
 
 รูป 9-1: schema ของ KM ใน SQLite (rag_store.py:99-115)
 
