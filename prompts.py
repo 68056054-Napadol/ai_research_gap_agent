@@ -7,7 +7,7 @@ of nodes.py means you can tune wording without touching control flow.
 KEYWORD_GEN_PROMPT = """You are helping a researcher find related academic papers on a topic.
 
 Research topic: {topic}
-{retry_context}
+{conditions}{retry_context}
 
 Generate 3-5 different search queries that would find papers related to this topic. Papers on
 the same topic often use different terminology, so vary phrasing, use synonyms, and include
@@ -20,6 +20,22 @@ RETRY_CONTEXT_TEMPLATE = """
 Previous search attempt(s) returned too few relevant papers. Queries already tried (avoid
 repeating these, go broader or use adjacent terminology instead):
 {prior_queries}
+"""
+
+# Node 4 "too broad" rule -> Node 1 (README "Decision rules and stop conditions").
+NARROW_CONTEXT_TEMPLATE = """
+The previous search was TOO BROAD: {n_candidates} candidates were found but only {n_passed}
+({pass_rate:.0%}) were close enough to the topic. Write MORE SPECIFIC queries instead: keep every
+qualifier of the topic and of the user's conditions (language, domain, data type, setting) in each
+query, and add the specific terms used by these on-topic papers:
+{on_topic_titles}
+Queries already tried (do not repeat them):
+{prior_queries}
+"""
+
+# User conditions (README "User conditions") - shown to the planning, search and gap prompts.
+CONDITIONS_TEMPLATE = """User conditions for this search (respect them):
+{lines}
 """
 
 EXTRACT_PROMPT = """Extract structured information from this paper. Base your answer ONLY on
@@ -68,7 +84,7 @@ papers (e.g. "X appears under-explored in the analysed papers"), never as a disc
 (avoid "no research exists", "has never been studied").
 
 Topic: {topic}
-Comparison table:
+{conditions}Comparison table:
 {comparison_table}
 
 Trend synthesis:
@@ -148,13 +164,14 @@ aspect of the topic. Stop when the topic is covered from several angles or the b
 Never invent papers - only the tool results count."""
 
 SEARCH_AGENT_PROMPT = """Research topic: {topic}
-Year range requested by the user: {year_from} to {year_to}
+{conditions}Year range requested by the user: {year_from} to {year_to}
 Sources you may use: {sources}
 Suggested queries from the planning step (use, refine or replace them):
 {queries}
 Budget: at most {budget} search_papers calls.
 
-Use limit 15-25 per call so the ranking step has enough candidates. After the first results,
+The candidate pool is small on purpose (about {pool} papers in total), so use limit 10-15 per call
+and spend calls on different aspects rather than on more results for one query. After the first results,
 check whether the papers actually match EVERY part of the topic (e.g. the language/domain/setting,
 not just the general method); if not, make follow-up calls aimed at the missing part.
 

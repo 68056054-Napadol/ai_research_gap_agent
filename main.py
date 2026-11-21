@@ -1,13 +1,17 @@
 """
 CLI entrypoint. Usage:
 
-    python main.py --topic "few-shot NER in low-resource languages" --year-from 2021 --max-papers 20
+    python main.py --topic "few-shot NER in low-resource languages" --year-from 2021 --max-papers 10 \
+        --include "NER" --exclude "survey, review" --focus "Southeast Asian languages"
 """
 import argparse
 import datetime
 import json
+import logging
 import os
 
+import citations
+import conditions as conditions_mod
 import evidence
 import links
 import metrics
@@ -51,7 +55,8 @@ def render_report(state: dict) -> str:
             gap.get("rationale", ""),
             "",
             "*Supporting papers:*",
-            *[f"- {links.markdown_link(sp)} `{sp['id']}`" for sp in gap.get("supporting_papers", [])],
+            *[f"- {links.markdown_link(sp)} `{sp['id']}` — {citations.status_line((state.get('citation_checks') or {}).get(sp['id']))}"
+              for sp in gap.get("supporting_papers", [])],
             "",
             "*Evidence sentences (verified verbatim in each supporting paper's text):*",
             *evidence.quote_lines(evidence.quotes_for_saved_gap(gap, state)),
@@ -104,7 +109,7 @@ def run_info(started: float, max_papers: int, entrypoint: str) -> dict:
 
 
 def run(topic: str, year_from=None, year_to=None, max_papers=None, session_id: str = None,
-        entrypoint: str = "cli", tags=None) -> dict:
+        entrypoint: str = "cli", tags=None, conditions: dict | None = None) -> dict:
     """Run the whole graph once and return the final state (used by main() and the evaluation
     scripts in evaluation/)."""
     import time
@@ -116,9 +121,15 @@ def run(topic: str, year_from=None, year_to=None, max_papers=None, session_id: s
         "year_from": year_from,
         "year_to": year_to,
         "max_papers": max_papers or CONFIG.max_deep_analysis_papers,
+        "search_conditions": conditions or {},
         "prior_queries_tried": [],
         "retry_count": 0,
+        "narrow_count": 0,
     }
+    if not CONFIG.mvp_min_papers <= initial_state["max_papers"] <= CONFIG.mvp_max_papers:
+        logging.getLogger(__name__).warning(
+            "max_papers=%d is outside the MVP range %d-%d (MVP_MIN_PAPERS/MVP_MAX_PAPERS) - say so when "
+            "reporting this run", initial_state["max_papers"], CONFIG.mvp_min_papers, CONFIG.mvp_max_papers)
     tracing.init()
     with tracing.run_trace(entrypoint, session_id=session_id, extra_tags=tags) as trace:
         final_state = app.invoke(initial_state, {"recursion_limit": 60})
@@ -152,6 +163,10 @@ def main():
     parser.add_argument("--year-from", type=int, default=None)
     parser.add_argument("--year-to", type=int, default=None)
     parser.add_argument("--max-papers", type=int, default=CONFIG.max_deep_analysis_papers)
+    parser.add_argument("--focus", default="", help="free-text conditions, e.g. 'Thai only, transformer methods'")
+    parser.add_argument("--include", default="", help="terms a paper must mention, comma-separated; a|b = either")
+    parser.add_argument("--exclude", default="", help="terms that drop a paper, comma-separated, e.g. 'survey, review'")
+    parser.add_argument("--sources", default=None, help="override ENABLED_SOURCES, e.g. openalex or openalex,arxiv")
     parser.add_argument("--backend", choices=["cloud", "local"], default=None, help="override LLM_BACKEND")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -159,9 +174,13 @@ def main():
     configure_console_logging(verbose=args.verbose)
     if args.backend:
         CONFIG.llm_backend = args.backend
+    if args.sources:
+        from config import _sources
+        CONFIG.enabled_sources = _sources(args.sources)
+    cond = conditions_mod.normalize(args.focus, args.include, args.exclude)
 
     print(f"Running agent for topic: {args.topic!r} ...")
-    final_state = run(args.topic, args.year_from, args.year_to, args.max_papers)
+    final_state = run(args.topic, args.year_from, args.year_to, args.max_papers, conditions=cond)
     decision = final_state.get("input_decision") or {}
     if decision.get("action") == "REJECT":
         print(f"\nInput rejected (decision rule {decision.get('rule')}): {decision.get('message')}")

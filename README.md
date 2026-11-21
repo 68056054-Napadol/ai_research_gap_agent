@@ -27,6 +27,7 @@ that tuning is the team's ongoing work (see "What to build next" at the bottom, 
 3. [Fact-checking](#fact-checking)
    - [Evidence levels](#evidence-levels-strong--moderate--limited)
    - [Decision rules and stop conditions](#decision-rules-and-stop-conditions)
+   - [User conditions](#user-conditions)
 4. [Prerequisites](#prerequisites)
 5. [Installation, step by step](#installation-step-by-step)
 6. [Configuration reference](#configuration-reference)
@@ -49,21 +50,22 @@ that tuning is the team's ongoing work (see "What to build next" at the bottom, 
 
 ## Architecture, in brief
 
-One LangGraph graph, nine nodes, two conditional edges, and two **tool-calling agents** inside it
+One LangGraph graph, ten nodes, two conditional edges (node 4 can loop back two ways), and two **tool-calling agents** inside it
 (node 2 and node 7 — the LLM itself chooses tool name + arguments, see
 [Tool calling](#tool-calling-the-agent-harness)). Full rationale for the original seven nodes is in
 the docx (§1–§9); this is just the map:
 
 | # | Node (`nodes.py`) | What it does |
 |---|---|---|
-| 0 | `sanitize_input` | Privacy check on the typed topic: regex + LLM entity extraction, then the **decision model** decides REDACT/KEEP per entity and PROCEED / PROCEED_REDACTED / REJECT for the input (rejected → END) |
-| 1 | `generate_keywords` | Turns the topic into 3–5 varied search queries (LLM, "fast" tier) |
+| 0 | `sanitize_input` | Privacy check on the typed topic **and the user conditions**: regex + LLM entity extraction, then the **decision model** decides REDACT/KEEP per entity and PROCEED / PROCEED_REDACTED / REJECT for the input (rejected → END) |
+| 1 | `generate_keywords` | Turns the topic + [user conditions](#user-conditions) into 3–5 varied search queries (LLM, "fast" tier); broader ones after a *too few* round, more specific ones after a *too broad* round |
 | 2 | `search_sources` | **Search agent**: the LLM calls the `search_papers` tool (query, source, year range, limit) as many times as it decides, sees each result, adapts; candidates accumulate across retry loops |
-| 3 | `filter_and_rank` | Ranks candidates by embedding cosine-similarity to the topic; keeps the top N above a threshold |
-| 4 | `check_sufficiency` | No LLM call — if too few papers passed the threshold, loops back to node 1 with feedback (capped at `MAX_RETRY_LOOPS`) |
+| 3 | `filter_and_rank` | Drops candidates that break the user's include/exclude terms (code, listed in the report), ranks the rest by embedding cosine-similarity to the topic; keeps the top N above a threshold |
+| 4 | `check_sufficiency` | No LLM call — judges the round **sufficient / too few / too broad** from counts; too few → node 1 for broader queries (`MAX_RETRY_LOOPS`), too broad → node 1 for more specific ones (`MAX_NARROW_LOOPS`); the run's token / time budget stops both |
 | 5 | `extract_paper_data` | Per paper: fetches the open-access PDF and converts it to Markdown if available (else uses the abstract), then extracts problem/method/dataset/findings/limitations/metrics (LLM, "fast" tier) |
 | 6 | `compare_papers` | Builds a comparison table across all extracted papers, then synthesizes cross-paper trends (LLM, "strong" tier) |
 | 7 | `analyze_gaps` | Proposes 2–4 Potential Research Gaps grounded in the table, drops cited ids that don't exist, then a **verifier agent** reads each cited paper's source text through the `get_paper_text` tool and returns a contract-validated verdict → evidence level Strong / Moderate / Limited |
+| 7b | `verify_citations` | No LLM call — every paper a gap cites is looked up in Crossref (and OpenAlex for non-OpenAlex papers); title / year / DOI must agree. Status per paper in the report; a gap whose citations do not all check out cannot be Strong (`citations.py`) |
 | 8 | `privacy_guard` | Privacy check on the **final answer** (trend summary + gaps): regex + author list + LLM extraction → decision model → redaction |
 
 The "fast" vs "strong" model tiers, the hybrid cloud/local backend, the confidence-scoring
@@ -181,16 +183,7 @@ source text before deciding, and a gap only reaches Moderate when the verifier r
 least half of the cited sources, Strong only when it read all of them (`evidence_coverage`, shown
 next to every gap). Cited ids
 that are not among the analyzed papers are dropped before verification (`dropped_ids`) — they
-used to count as evidence. The original note, kept for context: node 7's verifier used to only
-see `paper_extracts`, never the original source text. **Source-grounded verification** — giving
-the verifier the actual abstract/full text for each cited paper, not just its summary — would let
-it catch reasoning drift introduced *during* gap proposal against the real source, the same way
-extraction-quote grounding now catches drift introduced during extraction. It's a heavier lift
-(more tokens per verification call, since it's reading source text instead of a short structured
-summary) and wasn't implemented here, in part because `full_text` isn't reliably available for
-every paper (only open-access PDFs get fetched — see [Full-text PDF extraction](#full-text-pdf-extraction)),
-so for abstract-only papers it would mostly re-check the abstract against itself. Flagging it as
-the next step if the team wants to strengthen this further before a demo.
+used to count as evidence.
 
 ## Evidence levels (Strong / Moderate / Limited)
 
@@ -218,7 +211,8 @@ The rule (`evidence.evidence_level`, first match wins):
 | **Moderate** | หลักฐานปานกลาง | everything else |
 
 The ceilings from `nodes._confidence_caps` are kept: when fewer than `HIGH_CONFIDENCE_MIN_PAPERS`
-(8) papers were analysed, when fewer than `HIGH_CONFIDENCE_MIN_SOURCES` (2) sources answered, or
+(8) papers were analysed, when fewer than `HIGH_CONFIDENCE_MIN_SOURCES` (1 — the single-source MVP; set 2
+when several sources are enabled) sources answered, or
 when the verifier named a counterexample it could not quote, a gap cannot be Strong. Each gap
 also lists the criteria that kept it from the next level up (`evidence_level_reasons`).
 
@@ -241,25 +235,42 @@ the order a run meets them (defaults in brackets; change them in `.env`, see `co
 | 4 | node 2 | the model made **no** successful tool call | harness fallback: the planned queries are run through the same tool, labelled `harness_fallback` in the trace |
 | 5 | `sources/net.py` | HTTP 429/5xx retried up to `SOURCE_MAX_RETRIES` [3] (Retry-After honoured, ≤ `SOURCE_RETRY_MAX_WAIT` s); `SOURCE_DISABLE_AFTER_FAILURES` [3] consecutive failures | the source is switched off for the rest of the run and reported in *Search scope* |
 | 6 | `sources/arxiv.py` | strict AND query returns < 5 results (`MIN_STRICT_RESULTS`) and has more than 3 content words | one relaxed query |
-| 7 | node 2 | candidates accumulate across retry loops, deduplicated | capped at `MAX_CANDIDATE_PAPERS` [80] |
+| 7 | node 2 | candidates accumulate across retry loops, deduplicated | capped at `MAX_CANDIDATE_PAPERS` [30] |
+| 7a | node 3, `conditions.apply` | a candidate's title + abstract contains an `exclude` term, or misses an `include` term (see [User conditions](#user-conditions)) | dropped before ranking; listed with the reason in *Search scope* |
 | 8 | node 3, `embeddings.filter_by_threshold` | similarity cut-off per ranking model (`embeddings.RANKING_THRESHOLDS`: embeddinggemma 0.50, bge-small-en 0.78, else 0.50; `SIMILARITY_THRESHOLD` overrides); title-only papers get 0.05 slack | below the cut-off → dropped; the top `--max-papers` / `MAX_DEEP_ANALYSIS_PAPERS` [8] above it are selected |
-| 9 | node 4, `check_sufficiency` | `selected ≥ min(MIN_PAPERS_BEFORE_RETRY [5], max_papers)` | sufficient → extraction |
-| 10 | `route_after_sufficiency` | insufficient **and** `retry_count < MAX_RETRY_LOOPS` [3] **and** token budget left | **retry**: back to node 1 with the queries already tried (`RETRY_CONTEXT_TEMPLATE` asks for broader / adjacent terms) |
-| 11 | `route_after_sufficiency` | insufficient but `retry_count ≥ MAX_RETRY_LOOPS`, or `MAX_RUN_TOKENS` used up | **stop retrying**, extract whatever was selected |
+| 9a | node 4, `check_sufficiency` (checked first) | **too broad**: pool full (candidates ≥ `MAX_CANDIDATE_PAPERS`) **and** < `BROAD_MAX_PASS_RATE` [40 %] of them passed the cut-off **and** `narrow_count < MAX_NARROW_LOOPS` [1] | **narrow**: back to node 1; `NARROW_CONTEXT_TEMPLATE` asks for more specific queries that keep every qualifier and reuse terms of the on-topic titles; the loosely related candidates are dropped from the pool so the new results fit |
+| 9 | node 4, `check_sufficiency` | **sufficient**: `selected ≥ min(MIN_PAPERS_BEFORE_RETRY [8], max_papers)` **and** (candidates ≥ `MIN_CANDIDATE_PAPERS` [20] **or** the `max_papers` budget is filled) | → extraction. Otherwise **too few** |
+| 10 | `route_after_sufficiency` | too few **and** `retry_count < MAX_RETRY_LOOPS` [3] **and** budget left | **retry**: back to node 1 with the queries already tried (`RETRY_CONTEXT_TEMPLATE` asks for broader / adjacent terms) |
+| 11 | `route_after_sufficiency` | too few but `retry_count ≥ MAX_RETRY_LOOPS`, or `MAX_RUN_TOKENS` [250k] / `MAX_RUN_SECONDS` [1800] used up | **stop searching**, extract whatever was selected |
 | 12 | node 5 | paper has neither an abstract nor full text, or its extraction call fails | paper skipped, recorded in `skipped_papers` and shown in *Search scope* |
 | 13 | node 5, `_quote_verified` | extraction's `supporting_quote` not found verbatim in the text shown | extract kept, `quote_verified=False`; its sentence is not shown as evidence |
 | 14 | node 7 | cited ids not among the analysed papers | dropped (`dropped_ids`) before any rule below |
 | 15 | node 7 | fewer than `MIN_SUPPORTING_PAPERS_FOR_GAP` (2, `config.py`) valid supporting papers | gap **rejected** |
-| 16 | node 7, `MAX_RUN_TOKENS` [0 = off] | run's input + output tokens ≥ budget | remaining gaps are kept but **not verified** (evidence Limited) |
+| 16 | node 7, `MAX_RUN_TOKENS` [250k] / `MAX_RUN_SECONDS` [1800] | run's input + output tokens or wall-clock time ≥ budget | remaining gaps are kept but **not verified** (evidence Limited) |
 | 17 | node 7, `verifier_decision` (first match) | cited papers not relevant → not supported · counterexample named but not among the passages the tools returned, or quote < 30 chars / not verbatim → ignored (gap kept, flagged, no Strong) · verified counterexample → **refuted** · overstated → not supported · else supported | the LLM reports facts; this code decides |
 | 18 | node 7 | verifier read none of the cited papers | not supported, whatever its notes say |
 | 19 | node 7, `evidence.evidence_level` | see [Evidence levels](#evidence-levels-strong--moderate--limited), incl. the `_confidence_caps` ceiling | Strong / Moderate / Limited |
-| 20 | graph | LangGraph `recursion_limit` 60 | hard stop against an endless loop (rules 10/11 end the loop long before) |
+| 19a | node 7b, `citations.check_paper` | cited paper's Crossref/OpenAlex record: title similarity ≥ `CITATION_TITLE_SIM` [0.9], year ±1, same DOI → verified; found only by title → title_only; disagrees → mismatch; nothing → not_found; lookup failed / `VERIFY_CITATIONS=false` → unchecked | a gap with any supporting citation not verified / title_only is **capped below Strong**, with the reason listed; every status is printed in the report |
+| 20 | graph | LangGraph `recursion_limit` 60 | hard stop against an endless loop (rules 9a/10/11 end the loop long before) |
 
-**When the results are too broad** (many papers, mostly loosely related) the system does *not*
-keep rewriting queries: there is no "too many results" loop. Breadth is handled by the similarity
-cut-off (rule 8) and the `max_papers` budget, which keep only the most similar papers, and by
-`MAX_CANDIDATE_PAPERS` (rule 7). Only *too few* papers triggers a retry (rules 9–11).
+**Too few vs too broad.** Too few relevant papers → broader queries (rules 9–11). Too broad — the
+pool fills up but most candidates are only loosely related — → one round of more specific queries
+(rule 9a), after which the similarity cut-off (rule 8) and the `max_papers` budget pick the most
+similar papers. Both loops share the token / time budget (rule 11).
+
+## User conditions
+
+Besides the topic and the year range (MVP step 1: topic, years and conditions), a run takes:
+
+| Condition | CLI | Web UI | Used by |
+|---|---|---|---|
+| **focus** — free text, e.g. "Southeast Asian languages, transformer methods" | `--focus` | *Conditions → Focus* | node 1, 2 and 7 prompts (after the node 0 privacy check) |
+| **include** — terms a paper must mention; comma = all required, `a\|b` = either | `--include "NER, Thai\|Vietnamese"` | *Papers must mention* | node 3, by code, on title + abstract |
+| **exclude** — terms that drop a paper | `--exclude "survey, review"` | *Drop papers that mention* | node 3, by code |
+
+Matching is case-insensitive on whole words for Latin-script terms (`NER` does not match "inner");
+Thai and other unspaced scripts match as substrings. Every dropped paper is listed with its reason
+in the report's *Search scope*, so a reader can see what the conditions removed (`conditions.py`).
 
 ## Prerequisites
 
@@ -301,7 +312,8 @@ A few notes on what to expect:
   Streamlit (the web UI). It also downloads a small (~130MB) embedding model the *first time the
   ranking step actually runs* (not during `pip install`) — expect a one-time pause the first time
   you run the agent, not a hang.
-- **Step 5** — you do *not* need every key filled in. `arxiv` works with no key at all;
+- **Step 5** — the default source is **OpenAlex only** (`ENABLED_SOURCES=openalex`, the single-source
+  MVP), so fill in the free `OPENALEX_API_KEY` first. Other sources are optional: `arxiv` works with no key at all;
   `semantic_scholar` works unauthenticated at a lower rate limit (shared public pool). **`openalex`
   needs a free `OPENALEX_API_KEY` since Feb 2026** ([get one](https://openalex.org/settings/api)) —
   without it OpenAlex answers only a tiny daily allowance, the source drops out of the run, and
@@ -338,13 +350,18 @@ default — you only need to touch the ones relevant to your setup.
 | `SOURCE_MAX_RETRIES` / `SOURCE_RETRY_MAX_WAIT` / `SOURCE_DISABLE_AFTER_FAILURES` | `3` / `10` / `3` | Retries on 429/5xx (Retry-After honoured), and how many failed calls in a row switch a source off for the rest of the run |
 | `RANKING_EMBEDDING` | *(= `RAG_EMBEDDING`)* | Embedding Node 3 ranks candidates with |
 | `SIMILARITY_THRESHOLD` | *(per model)* | Override the relevance cut-off; defaults per model in `embeddings.RANKING_THRESHOLDS` |
-| `HIGH_CONFIDENCE_MIN_PAPERS` / `HIGH_CONFIDENCE_MIN_SOURCES` | `8` / `2` | A gap can only be **Strong** when the run analysed this many papers from this many sources that answered |
+| `HIGH_CONFIDENCE_MIN_PAPERS` / `HIGH_CONFIDENCE_MIN_SOURCES` | `8` / `1` | A gap can only be **Strong** when the run analysed this many papers from this many sources that answered |
 | `EVIDENCE_STRONG_*` / `EVIDENCE_MODERATE_*` | see [Evidence levels](#evidence-levels-strong--moderate--limited) | Per-gap thresholds for Strong / Moderate |
-| `MAX_RUN_TOKENS` | `0` (off) | Token budget per run; when used up, no more retry loops or verifier runs |
+| `ENABLED_SOURCES` | `openalex` | Paper sources, comma-separated. **MVP: one source** (one data format, no cross-source duplicates); widen with e.g. `openalex,semantic_scholar,arxiv` and say so in results. CLI `--sources` |
+| `MAX_RUN_TOKENS` / `MAX_RUN_SECONDS` | `250000` / `1800` | Budget per run (0 = off); when used up, no more search loops or verifier runs, and *Search scope → Limits* says so |
+| `MIN_CANDIDATE_PAPERS` | `20` | Fewer candidates than this (while the paper budget is not filled) = *too few* → broader queries |
+| `BROAD_MAX_PASS_RATE` / `MAX_NARROW_LOOPS` | `0.4` / `1` | *Too broad* rule: pool full and fewer than this share passed the cut-off → this many rounds of more specific queries |
+| `MVP_MIN_PAPERS` / `MVP_MAX_PAPERS` | `8` / `12` | Web UI slider range for papers analysed (the CLI warns outside it) |
+| `VERIFY_CITATIONS` / `CITATION_TITLE_SIM` | `true` / `0.9` | Citation check before the report (node 7b); `false` = no lookups, every citation *unchecked* |
 | `PRIVACY_LLM_ON_PAPERS` | `always` | `always` / `auto` / `never` — see [Privacy](#privacy-llm-extraction--decision-model) |
 | `UNPAYWALL_EMAIL` | *(empty)* | Reserved for a future Unpaywall connector — see "What to build next" |
-| `MAX_CANDIDATE_PAPERS` | `80` | Broad search pool size (metadata only, cheap) |
-| `MAX_DEEP_ANALYSIS_PAPERS` | `8` | How many papers get full extraction (~45 s each on a local 14B model) (the expensive tier) — overridable per-run via `--max-papers` or the web UI's slider |
+| `MAX_CANDIDATE_PAPERS` | `30` | Candidate pool size (metadata only, cheap) — MVP: 20–30 |
+| `MAX_DEEP_ANALYSIS_PAPERS` | `10` | How many papers get full extraction (~45 s each on a local 14B model) (the expensive tier) — overridable per-run via `--max-papers` or the web UI's slider |
 | `MIN_PAPERS_BEFORE_RETRY` | `5` | Node 4's threshold for triggering a broader-search retry |
 | `MAX_RETRY_LOOPS` | `3` | Hard cap on retry loops, so a bad topic can't loop forever |
 
@@ -406,7 +423,7 @@ small follow-on code change if the team wants it (see the docx §10.6 for more o
 
 ```bash
 python main.py --topic "few-shot named entity recognition in low-resource languages" \
-                --year-from 2021 --max-papers 20 --verbose
+                --year-from 2021 --max-papers 10 --exclude "survey, review" --verbose
 ```
 
 Flags (all except `--topic` are optional):
@@ -416,7 +433,9 @@ Flags (all except `--topic` are optional):
 | `--topic` | Research topic / question (**required**) | — |
 | `--year-from` | Only consider papers published in/after this year | no limit |
 | `--year-to` | Only consider papers published in/before this year | no limit |
-| `--max-papers` | How many papers get full extraction (the expensive tier) | `MAX_DEEP_ANALYSIS_PAPERS` from `.env` |
+| `--max-papers` | How many papers get full extraction (the expensive tier); MVP range 8–12 | `MAX_DEEP_ANALYSIS_PAPERS` from `.env` |
+| `--focus` / `--include` / `--exclude` | [User conditions](#user-conditions) | none |
+| `--sources` | Override `ENABLED_SOURCES` for this run | `openalex` |
 | `--verbose` | Print progress for every pipeline stage as it runs, not just the final result | off |
 
 Output: a Markdown report at `output/<timestamp>_report.md`, plus a full JSON state dump at
@@ -485,7 +504,7 @@ to its abstract, same as before this feature existed — this never aborts a run
 
 ## Testing and verifying your setup
 
-Run `python -m pytest -q tests` first: 102 offline tests (fictional fake papers + a scripted LLM,
+Run `python -m pytest -q tests` first: 111 offline tests (fictional fake papers + a scripted LLM,
 no network or API key) covering tool calling, contracts, the decision model and privacy. Beyond
 that, "testing" means two things: **confirming your install works**, and **judging whether the
 agent's actual output is good**.
@@ -560,6 +579,8 @@ tracing.py                # optional Langfuse tracing (no-op without keys)
 outbound.py               # outbound contract: no PII in traces, saved state or reports
 contracts.py              # pydantic contracts for every LLM output and tool argument
 evidence.py               # Potential Research Gaps wording, search scope, evidence levels + verified quotes
+citations.py              # citation check before the report (Crossref / OpenAlex, node 7b)
+conditions.py             # user conditions: focus / include / exclude terms
 privacy.py                # regex / metadata / LLM detectors + redaction
 decision_model/           # sensitive_info.dmn.json decision tables + evaluator
 metrics.py                # per-run counters (contracts, tool calls, tokens)
@@ -579,6 +600,8 @@ evaluation/compare_models.py     # open-source (Ollama) vs commercial (Claude) o
 evaluation/calibrate_ranking.py  # relevance cut-off per embedding model: AUC, p@5/8/10 on hand labels
 evaluation/eval_extraction.py    # extraction vs human-filled extraction_gold CSV
 evaluation/eval_citations.py     # cited title/year/DOI vs OpenAlex + Crossref
+evaluation/eval_grounding.py     # invented references / numbers / names in the answer + human audit sheets
+evaluation/run_test_set.py       # runs the fixed test set (evaluation/data/test_topics.json) once per topic
 evaluation/eval_query_adaptation.py  # narrow topics: retry / new queries / more papers
 evaluation/data/*_TEMPLATE.csv   # empty templates the group fills in (no answers in the repo)
 dashboard.py / dashboard_page.py # Dashboard over all saved runs (data / Streamlit page)
@@ -666,12 +689,14 @@ where speed matters more than a few leaked citation names.
 ## Evaluation scripts and offline tests
 
 ```bash
-python -m pytest -q tests                      # 102 offline tests, no network/API key (fictional data)
+python -m pytest -q tests                      # 111 offline tests, no network/API key (fictional data)
 python evaluation/consistency_test.py --runs 5 --max-papers 6          # same question x5
 python evaluation/compare_models.py --runs 2 --max-papers 5            # Claude vs Ollama (qwen3)
 python evaluation/calibrate_ranking.py --models "gemma=ollama:embeddinggemma:300m"   # AUC, cut-off, p@5/8/10
 python evaluation/eval_query_adaptation.py --max-papers 8              # narrow topics: retry, new queries, more papers?
+python evaluation/run_test_set.py                                      # the fixed test set (data/test_topics.json), saved runs
 python evaluation/eval_citations.py                                    # cited title/year/DOI vs OpenAlex + Crossref
+python evaluation/eval_grounding.py --make-audit                       # invented refs / numbers / names in the answer + audit sheets
 python evaluation/eval_extraction.py --make-template output/<run>_state.json   # empty template for annotators
 python evaluation/eval_extraction.py --gold evaluation/data/extraction_gold_<run>.csv  # after people filled it in
 ```
@@ -680,7 +705,7 @@ All scripts write Markdown + JSON to `evaluation/results/`. `--offline` (consist
 models, query adaptation) runs them on the fake data in `tests/fakes.py` — only to check the
 script works, the numbers are not an evaluation.
 
-The seven evaluation dimensions, and **which parts need a person** (reference answers, ratings,
+The eight evaluation dimensions, the fixed test set, the targets set before results, and **which parts need a person** (reference answers, ratings,
 labels — no script writes them), are in [`evaluation/eval_plan.md`](evaluation/eval_plan.md).
 Templates for the human parts: `evaluation/data/extraction_gold_TEMPLATE.csv`,
 `gap_reference_TEMPLATE.csv`, `gap_rating_TEMPLATE.csv`.
@@ -888,16 +913,13 @@ author comparison uses one-way hashes (`sources.author_keys`) kept after the nam
 
 Team split — see architecture doc §6.
 
-1. **Member A** — tune `config.SIMILARITY_THRESHOLD` and the Node 3 ranking logic against real
-   searches; test the Node 4 retry loop actually broadens results on a deliberately narrow topic.
-   (The full-text PDF connector is done — see `sources/pdf_extract.py` and
-   [Full-text PDF extraction](#full-text-pdf-extraction) above — but it only covers open-access
-   PDFs; wiring in Unpaywall's API to resolve more DOIs to OA copies would raise the full-text
-   hit rate further.)
-2. **Member B** — iterate the extraction schema/prompt in `prompts.py` (`EXTRACT_PROMPT`) against
-   papers you've read yourself; tighten `nodes.compare_papers` if the trend narrative drifts
-   from the table.
-3. **Member C** — iterate `GAP_ANALYSIS_PROMPT` and `VERIFIER_PROMPT`; the confidence scoring
-   formula in `nodes.analyze_gaps` is a working first pass, not a validated one — run the
-   calibration check in [Testing](#testing-and-verifying-your-setup) and retune the weights (marked
-   with a `TODO` in the code) before treating the scores as trustworthy.
+1. **Evaluation first** — run `evaluation/run_test_set.py`, then the human parts of
+   [`evaluation/eval_plan.md`](evaluation/eval_plan.md) (§0 assigns topics to members A/B/C) and fill in its
+   targets table. Tune prompts and thresholds on the **dev** topics (T1, T2) only.
+2. **Member A** — retrieval: check the narrow/broaden rules on T3/T4 and the cut-off against the new
+   ranking labels; Unpaywall would raise the full-text share.
+3. **Member B** — extraction: iterate `EXTRACT_PROMPT` against the extraction gold; check what the
+   include/exclude conditions drop on T5.
+4. **Member C** — gaps: iterate `GAP_ANALYSIS_PROMPT` / `VERIFIER_PROMPT` against the reference gaps and
+   ratings; use the grounding audit (§8) to see which kinds of sentences are unsupported. The legacy
+   0–100 score is no longer used for the answer and needs no calibration.

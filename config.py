@@ -34,6 +34,15 @@ def _privacy_mode(raw: str) -> str:
     return v if v in ("auto", "always", "never") else "always"
 
 
+KNOWN_SOURCES = ("openalex", "semantic_scholar", "arxiv")
+
+
+def _sources(raw: str) -> tuple:
+    names = [n.strip().lower() for n in raw.split("#", 1)[0].split(",") if n.strip()]
+    names = [n for n in names if n in KNOWN_SOURCES]
+    return tuple(dict.fromkeys(names)) or ("openalex",)
+
+
 def _secret(name: str) -> str:
     raw = os.getenv(name, "").split(" #", 1)[0].strip().strip('"').strip("'")
     if not raw or raw.lower() in ("none", "null", "false") or any(m in raw.lower() for m in _PLACEHOLDER_MARKERS):
@@ -129,7 +138,11 @@ class Config:
     unpaywall_email: str = os.getenv("UNPAYWALL_EMAIL", "")
 
     # --- Which sources are enabled for this run ---
-    enabled_sources: tuple = ("semantic_scholar", "arxiv", "openalex")
+    # MVP scope (teacher feedback): ONE source by default, so a run has one data format, one rate
+    # limit and no cross-source duplicates to reconcile. OpenAlex: abstracts, DOIs and open-access
+    # links in one API (needs the free OPENALEX_API_KEY). Comma-separated list to widen it, e.g.
+    # ENABLED_SOURCES=openalex,semantic_scholar,arxiv - say so when you report results.
+    enabled_sources: tuple = _sources(os.getenv("ENABLED_SOURCES", "openalex"))
 
     # --- Full-text PDF extraction (Node 5 — see sources/pdf_extract.py) ---
     # Off switch: full-text extraction roughly doubles Node 5's network+CPU work per paper, so
@@ -141,17 +154,31 @@ class Config:
     pdf_max_download_mb: int = _int("PDF_MAX_DOWNLOAD_MB", 25)
 
     # --- Paper-count / cost-control budget (architecture doc §7.4) ---
-    max_candidate_papers: int = _int("MAX_CANDIDATE_PAPERS", 80)      # broad search pool, metadata only
-    max_deep_analysis_papers: int = _int("MAX_DEEP_ANALYSIS_PAPERS", 8)  # papers that get full extraction
-    # (8: ~10 min on a local 14B model. Each extra paper costs ~45 s - extraction + PDF + RAG.)
+    # MVP scope (teacher feedback): ~20-30 candidates, of which 8-12 with enough abstract/metadata
+    # are analysed. Enough for a demo, NOT a systematic review - the report says so.
+    max_candidate_papers: int = _int("MAX_CANDIDATE_PAPERS", 30)      # candidate pool, metadata only
+    min_candidate_papers: int = _int("MIN_CANDIDATE_PAPERS", 20)      # fewer -> "too few" -> broaden (Node 4)
+    max_deep_analysis_papers: int = _int("MAX_DEEP_ANALYSIS_PAPERS", 10)  # papers that get full extraction
+    mvp_min_papers: int = _int("MVP_MIN_PAPERS", 8)                   # UI slider range for papers analysed
+    mvp_max_papers: int = _int("MVP_MAX_PAPERS", 12)
+    # (10: ~8-12 min on a local 14B model. Each extra paper costs ~45 s - extraction + PDF + RAG.)
 
     # --- Sufficiency-check retry loop (architecture doc §2.2, Node 4) ---
-    min_papers_before_retry: int = _int("MIN_PAPERS_BEFORE_RETRY", 5)
+    min_papers_before_retry: int = _int("MIN_PAPERS_BEFORE_RETRY", 8)
     max_retry_loops: int = _int("MAX_RETRY_LOOPS", 3)
+    # "Too broad" rule (Node 4): the candidate pool is full (>= MAX_CANDIDATE_PAPERS) but fewer than
+    # BROAD_MAX_PASS_RATE of the candidates pass the relevance cut-off -> the queries are too
+    # general, so Node 1 is asked for MORE SPECIFIC queries (at most MAX_NARROW_LOOPS times).
+    broad_max_pass_rate: float = _float("BROAD_MAX_PASS_RATE", 0.4)
+    max_narrow_loops: int = _int("MAX_NARROW_LOOPS", 1)
     # Token budget for one run (input + output tokens, metrics.py). 0 = no limit. Once used up, the
     # optional, repeatable work stops: no further retry loop (Node 4) and no further verifier runs
     # (Node 7 - the remaining gaps are kept but marked unverified, so their evidence is Limited).
-    max_run_tokens: int = _int("MAX_RUN_TOKENS", 0)
+    # Default 250k: measured runs used ~45-60k tokens for 5 papers (evaluation/results/compare_models_*),
+    # so 10-12 papers plus retries fit with room; a run that loops or stalls is cut off.
+    max_run_tokens: int = _int("MAX_RUN_TOKENS", 250_000)
+    # Wall-clock budget for one run in seconds (0 = off); checked at the same points as the tokens.
+    max_run_seconds: int = _int("MAX_RUN_SECONDS", 1800)
 
     # --- Relevance ranking (architecture doc §7.2) ---
     embedding_model_name: str = "BAAI/bge-small-en-v1.5"
@@ -172,7 +199,9 @@ class Config:
     # the search behind it. "High" needs at least this many analysed papers and this many paper
     # sources that actually answered; otherwise the score is capped just below High.
     high_confidence_min_papers: int = _int("HIGH_CONFIDENCE_MIN_PAPERS", 8)
-    high_confidence_min_sources: int = _int("HIGH_CONFIDENCE_MIN_SOURCES", 2)
+    # 1 with the single-source MVP: the report already names the one source, and requiring 2 would
+    # make Strong impossible by construction. Raise to 2 when you enable several sources.
+    high_confidence_min_sources: int = _int("HIGH_CONFIDENCE_MIN_SOURCES", 1)
 
     # --- Evidence level of a potential gap (README "Evidence levels") ---
     # Written down before looking at results, and only COUNTABLE facts: how many analysed papers
@@ -191,6 +220,14 @@ class Config:
     evidence_strong_max_age_years: int = _int("EVIDENCE_STRONG_MAX_AGE_YEARS", 3)   # age of the NEWEST supporting paper
     evidence_moderate_min_supporting: int = _int("EVIDENCE_MODERATE_MIN_SUPPORTING", 2)
     evidence_moderate_min_coverage: float = _float("EVIDENCE_MODERATE_MIN_COVERAGE", 0.5)
+
+    # --- Citation check before the report (citations.py, Node 8 verify_citations) ---
+    # Every paper a gap cites is looked up in Crossref (by DOI, else title) and, when it did not come
+    # from OpenAlex, in OpenAlex; title / year / DOI must agree. A gap citing a paper that does not
+    # check out cannot be Strong. VERIFY_CITATIONS=false skips the network lookups (offline runs).
+    verify_citations: bool = os.getenv("VERIFY_CITATIONS", "true").strip().lower() in ("1", "true", "yes")
+    citation_title_sim: float = _float("CITATION_TITLE_SIM", 0.9)
+    citation_timeout: float = _float("CITATION_TIMEOUT", 15.0)
 
     # --- Output ---
     output_dir: str = "output"

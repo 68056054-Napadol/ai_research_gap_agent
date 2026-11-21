@@ -35,6 +35,9 @@ def enable_offline_fakes() -> None:
     CONFIG.fetch_full_text = False
     CONFIG.similarity_threshold = 0.1
     CONFIG.min_papers_before_retry = 3
+    CONFIG.min_candidate_papers = 1            # the fake corpus has 6 papers
+    CONFIG.enabled_sources = ("semantic_scholar", "arxiv", "openalex")   # the fakes script multi-source calls
+    CONFIG.verify_citations = False            # no network in offline mode
 
 
 def timed_run(topic: str, year_from=None, year_to=None, max_papers=None, session_id=None, tags=None) -> tuple:

@@ -56,6 +56,39 @@ def search_scope(state: dict) -> dict:
         "n_full_text": n_full,
         "n_abstract_only": len(extracts) - n_full,
         "skipped_papers": list(state.get("skipped_papers") or []),
+        "conditions": state.get("search_conditions") or {},
+        "excluded_by_conditions": list(state.get("excluded_by_conditions") or []),
+        "narrow_loops": state.get("narrow_count", 0),
+        "rounds": [{"round": r.get("round"), "mode": r.get("mode", "initial"), "verdict": r.get("verdict")}
+                   for r in state.get("search_rounds") or []],
+        "analysis_basis": _analysis_basis(n_full, len(extracts)),
+        "budget": _budget(state),
+        "citation_checks": state.get("citation_checks") or {},
+    }
+
+
+def _analysis_basis(n_full: int, n_total: int) -> str:
+    if not n_total:
+        return "nothing analysed"
+    if n_full == n_total:
+        return "full text"
+    if n_full == 0:
+        return "abstract only"
+    return "mixed (full text where an open-access PDF was found, else abstract)"
+
+
+def _budget(state: dict) -> dict:
+    from config import CONFIG
+    rm = state.get("run_metrics") or {}
+    return {
+        "max_retry_loops": CONFIG.max_retry_loops, "max_narrow_loops": CONFIG.max_narrow_loops,
+        "max_run_tokens": CONFIG.max_run_tokens, "max_run_seconds": CONFIG.max_run_seconds,
+        "tokens_used": int((rm.get("input_tokens") or 0) + (rm.get("output_tokens") or 0)),
+        "llm_calls": int(rm.get("llm_calls") or 0),
+        "seconds": (state.get("run_info") or {}).get("seconds"),
+        "max_candidates": CONFIG.max_candidate_papers, "max_papers": state.get("max_papers"),
+        "stopped_by_budget": any(rm.get(k) for k in ("token_budget_stopped_retry", "time_budget_stopped_retry",
+                                                     "token_budget_skipped_verifier", "time_budget_skipped_verifier")),
     }
 
 
@@ -72,6 +105,11 @@ def search_scope_lines(scope: dict) -> list:
     else:
         sources = f"**Sources enabled:** {', '.join(scope['enabled_sources']) or '?'} · answered/failed: not recorded"
     skipped = scope["skipped_papers"]
+    import conditions
+    cond_lines = conditions.describe(scope.get("conditions"))
+    excluded = scope.get("excluded_by_conditions") or []
+    b = scope.get("budget") or {}
+    rounds = scope.get("rounds") or []
     lines = [
         f"- {sources}",
         f"- **Years:** {_year_range(scope)} · **retry loops:** {scope['retry_loops']}",
@@ -85,6 +123,33 @@ def search_scope_lines(scope: dict) -> list:
         f"- **Skipped papers ({len(skipped)}):** "
         + ("; ".join(f"{s.get('title') or s.get('id')} (`{s.get('id')}`) - {s.get('reason')}" for s in skipped) or "none"),
     ]
+    if scope.get("analysis_basis"):
+        lines.insert(4, f"- **Analysed from:** {scope['analysis_basis']}")
+    lines.insert(1, "- **User conditions:** " + (" · ".join(cond_lines) if cond_lines else "none")
+                 + (f" — {len(excluded)} candidate(s) dropped by them: "
+                    + "; ".join(f"{e.get('title') or e.get('id')} ({e.get('reason')})" for e in excluded[:10])
+                    + (" …" if len(excluded) > 10 else "") if excluded else ""))
+    if rounds:
+        lines.append("- **Search rounds:** " + " → ".join(
+            f"{r['round']}: {r['mode']}" + (f" ({r['verdict']})" if r.get("verdict") else "") for r in rounds))
+    if b:
+        tok = f"{b['tokens_used']:,} / {b['max_run_tokens']:,}" if b.get("max_run_tokens") else f"{b['tokens_used']:,} / no limit"
+        secs = f"{b['seconds']:.0f} s" if isinstance(b.get("seconds"), (int, float)) else "?"
+        lines.append(f"- **Limits:** ≤ {b['max_candidates']} candidates, ≤ {b.get('max_papers')} analysed papers, "
+                     f"broadening stops after {b['max_retry_loops']} too-few rounds, ≤ {b['max_narrow_loops']} narrow round(s) · tokens {tok} · "
+                     f"time {secs}" + (f" / {b['max_run_seconds']} s" if b.get("max_run_seconds") else "")
+                     + f" · LLM calls {b['llm_calls']}" + (" · **stopped early by the budget**" if b.get("stopped_by_budget") else ""))
+    checks = scope.get("citation_checks") or {}
+    if checks:
+        import citations
+        counts = {}
+        for c in checks.values():
+            counts[c["status"]] = counts.get(c["status"], 0) + 1
+        lines.append(f"- **Citation check ({len(checks)} cited papers vs Crossref/OpenAlex):** "
+                     + ", ".join(f"{citations.STATUS_MARK[k]} {k} {v}" for k, v in sorted(counts.items())))
+    lines.append("- **Not covered:** papers outside these sources, queries and years; papers without an abstract; "
+                 "for abstract-only papers, anything not stated in the abstract. 8–12 papers is a demo-sized "
+                 "sample, not a systematic literature review.")
     return lines
 
 

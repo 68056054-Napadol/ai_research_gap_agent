@@ -53,6 +53,11 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(CONFIG, "high_confidence_min_sources", 2)
     monkeypatch.setattr(CONFIG, "tracing_enabled", True)
     monkeypatch.setattr(CONFIG, "max_run_tokens", 0)
+    monkeypatch.setattr(CONFIG, "max_run_seconds", 0)
+    # the tests exercise multi-source behaviour; the shipped default is the single-source MVP
+    monkeypatch.setattr(CONFIG, "enabled_sources", ("semantic_scholar", "arxiv", "openalex"))
+    monkeypatch.setattr(CONFIG, "min_candidate_papers", 1)       # the fake corpus has only 6 papers
+    monkeypatch.setattr(CONFIG, "verify_citations", False)       # no network; tests below fake the lookups
     return fake
 
 
@@ -536,8 +541,9 @@ def test_verifier_context_records_every_text_it_showed(offline):
     assert "few-shot NER" in " ".join(ctx.shown_text["arxiv:0000.00001"])
 
 
-def test_narrow_search_caps_confidence_below_high():
+def test_narrow_search_caps_confidence_below_high(monkeypatch):
     import nodes
+    monkeypatch.setattr(CONFIG, "high_confidence_min_sources", 2)   # default is 1 for the single-source MVP
     state = {"paper_extracts": [{}] * 5,
              "source_health": {"arxiv": {"ok": 5}, "semantic_scholar": {"ok": 0, "last_error": "rate limited (429)"},
                                "openalex": {"ok": 0, "last_error": "rate limited (429)"}}}
@@ -1133,3 +1139,180 @@ def test_extraction_that_copies_the_template_is_re_asked(offline, monkeypatch):
     for e in state["paper_extracts"]:
         assert not any(str(e.get(f, "")).lower().startswith(d) for f, d in EXTRACT_FIELD_DESCRIPTIONS.items())
     assert state["run_metrics"].get("json_calls_needed_retry", 0) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Teacher feedback, Nov 2026: single-source MVP, 20-30 -> 8-12 papers, budgets, user conditions,
+# "too broad" rule, citation check before the report
+# ---------------------------------------------------------------------------
+def test_mvp_defaults(monkeypatch):
+    import config
+    for k in ("ENABLED_SOURCES", "MAX_CANDIDATE_PAPERS", "MAX_DEEP_ANALYSIS_PAPERS", "MAX_RUN_TOKENS",
+              "MAX_RUN_SECONDS", "HIGH_CONFIDENCE_MIN_SOURCES", "MIN_CANDIDATE_PAPERS"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = config.Config.__dataclass_fields__
+    assert cfg["enabled_sources"].default == ("openalex",)
+    assert config._sources("openalex, arxiv ,bogus") == ("openalex", "arxiv")
+    assert config._sources("") == ("openalex",)
+    assert 20 <= cfg["max_candidate_papers"].default <= 30 and cfg["min_candidate_papers"].default == 20
+    assert 8 <= cfg["max_deep_analysis_papers"].default <= 12
+    assert (cfg["mvp_min_papers"].default, cfg["mvp_max_papers"].default) == (8, 12)
+    assert cfg["max_run_tokens"].default > 0 and cfg["max_run_seconds"].default > 0
+    assert cfg["high_confidence_min_sources"].default == 1      # Strong must stay reachable with one source
+
+
+def test_condition_terms_match_words_and_thai():
+    import conditions
+    c = conditions.normalize("", "NER, Thai|Vietnamese", "survey, review")
+    assert c["include"] == [["ner"], ["thai", "vietnamese"]] and c["exclude"] == ["survey", "review"]
+    ok = {"title": "Few-shot NER for Vietnamese", "abstract": "We study named entities."}
+    assert conditions.check_paper(ok, c) == (True, "")
+    inner = {"title": "An inner product method for Thai text", "abstract": ""}   # "ner" only inside "inner"
+    assert conditions.check_paper(inner, c)[0] is False
+    surv = {"title": "A survey of NER for Thai", "abstract": ""}
+    keep, why = conditions.check_paper(surv, c)
+    assert not keep and "survey" in why
+    th = conditions.normalize("", "ภาษาไทย")
+    assert conditions.check_paper({"title": "การรู้จำชื่อเฉพาะภาษาไทยแบบ few-shot"}, th)[0]
+    assert conditions.is_empty(conditions.normalize()) and conditions.prompt_block({}) == ""
+
+
+def test_user_conditions_reach_prompts_filter_papers_and_report(offline):
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5,
+                     conditions={"focus": "low-resource Asian languages, compare with Dr. Pat Realperson",
+                                 "include": "", "exclude": "crop, satellite"})
+    cond = state["search_conditions"]
+    assert "Pat Realperson" not in cond["focus"] and "Asian languages" in cond["focus"]   # privacy-checked
+    assert cond["exclude"] == ["crop", "satellite"]
+    dropped = state["excluded_by_conditions"]
+    assert dropped and all("crop" in (d["title"] or "").lower() for d in dropped)
+    assert all("crop" not in p["title"].lower() for p in state["selected_papers"])
+    planning = [p for p in offline.prompts if "Generate 3-5 different search queries" in p]
+    gap = [p for p in offline.prompts if "Propose 2-4 Potential Research Gaps" in p]
+    assert planning and all("Papers must NOT mention: crop, satellite" in p for p in planning)
+    assert gap and "Asian languages" in gap[0]
+    report = main.render_report(state)
+    assert "User conditions:" in report and "dropped by them" in report and "Pat Realperson" not in report
+
+
+def test_too_broad_search_narrows_once_with_specific_queries(offline, monkeypatch):
+    import nodes
+    monkeypatch.setattr(CONFIG, "max_candidate_papers", 6)       # the fake corpus fills the pool
+    monkeypatch.setattr(CONFIG, "broad_max_pass_rate", 1.01)     # every full pool counts as too broad
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5)
+    rounds = state["search_rounds"]
+    assert [r["mode"] for r in rounds][:2] == ["initial", "narrow"]
+    assert rounds[0]["verdict"] == "too_broad" and state["narrow_count"] == 1
+    assert sum(1 for r in rounds if r.get("verdict") == "too_broad") == 1      # capped by MAX_NARROW_LOOPS
+    narrow = [p for p in offline.prompts if "TOO BROAD" in p]
+    assert len(narrow) == 1 and "Queries already tried" in narrow[0]
+    assert "2: narrow" in main.render_report(state)
+    # routing rules on their own
+    assert nodes.route_after_sufficiency({"search_verdict": "too_broad", "narrow_count": 1}) == "narrow"
+    monkeypatch.setattr(CONFIG, "max_run_seconds", 1)
+    monkeypatch.setattr(nodes, "run_seconds", lambda: 99)
+    assert "MAX_RUN_SECONDS" in nodes.run_budget_exceeded()
+    assert nodes.route_after_sufficiency({"search_verdict": "too_broad", "selected_papers": []}) == "extract"
+
+
+def test_too_few_candidates_broadens_until_the_budget_is_filled(offline, monkeypatch):
+    import nodes
+    monkeypatch.setattr(CONFIG, "min_candidate_papers", 20)
+    monkeypatch.setattr(CONFIG, "min_papers_before_retry", 3)
+    st = {"candidate_papers": [{}] * 6, "ranked_papers": [{}] * 6, "selected_papers": [{}] * 4, "max_papers": 8}
+    assert nodes.check_sufficiency(st)["search_verdict"] == "too_few"          # pool < 20, budget not filled
+    st["max_papers"] = 4
+    assert nodes.check_sufficiency(st)["search_verdict"] == "sufficient"       # budget filled - more adds nothing
+
+
+def _cite_state():
+    papers = [{"id": "openalex:W1", "source": "openalex", "title": "Prompt-based few-shot NER", "year": 2024, "doi": "10.1/a"},
+              {"id": "openalex:W2", "source": "openalex", "title": "Cross-lingual transfer for NER", "year": 2023, "doi": "10.1/b"},
+              {"id": "arxiv:3", "source": "arxiv", "title": "Meta-learning for NER", "year": 2025, "doi": None}]
+    gap = {"claim": "c", "supporting_paper_ids": [p["id"] for p in papers], "evidence_level": "Strong",
+           "confidence_level": "Strong", "evidence_level_reasons": [],
+           "supporting_papers": [{"id": p["id"], "title": p["title"], "year": p["year"]} for p in papers]}
+    return {"selected_papers": papers, "gap_candidates": [gap]}
+
+
+def _fake_get(url, params):
+    if "crossref" in url and url.endswith("10.1/a"):
+        return {"message": {"title": ["Prompt-based few-shot NER"], "issued": {"date-parts": [[2024]]}, "DOI": "10.1/a"}}
+    if "crossref" in url and url.endswith("10.1/b"):
+        return {"message": {"title": ["Cross-lingual transfer for NER"], "issued": {"date-parts": [[2019]]}, "DOI": "10.1/b"}}
+    if "crossref" in url:
+        return {"message": {"items": []}}
+    if "openalex" in url and "search" in params:
+        return {"results": []}
+    return None
+
+
+def test_citation_check_runs_before_the_report_and_caps_strong(monkeypatch):
+    import citations
+    import nodes
+    monkeypatch.setattr(CONFIG, "verify_citations", True)
+    monkeypatch.setattr(CONFIG, "max_run_seconds", 0)
+    out = nodes.verify_citations(_cite_state(), get=_fake_get)
+    checks = out["citation_checks"]
+    assert checks["openalex:W1"]["status"] == citations.VERIFIED
+    assert checks["openalex:W2"]["status"] == citations.MISMATCH and "year 2019" in checks["openalex:W2"]["summary"]
+    assert checks["arxiv:3"]["status"] == citations.NOT_FOUND
+    assert {c["service"] for c in checks["arxiv:3"]["checks"]} == {"crossref", "openalex"}   # non-OpenAlex paper: both
+    assert {c["service"] for c in checks["openalex:W1"]["checks"]} == {"crossref"}          # never OpenAlex vs itself
+    g = out["gap_candidates"][0]
+    assert g["citation_check"]["n_ok"] == 1 and g["evidence_level"] == "Moderate"
+    assert any("did not check out" in r for r in g["evidence_level_reasons"])
+    state = {**_cite_state(), **out, "research_topic": "t"}
+    report = main.render_report(state)
+    assert "citation verified" in report and "citation mismatch" in report and "Citation check (3 cited papers" in report
+
+
+def test_citation_check_survives_network_errors(monkeypatch):
+    import citations
+    import nodes
+    monkeypatch.setattr(CONFIG, "verify_citations", True)
+
+    def boom(url, params):
+        raise ConnectionError("proxy")
+    out = nodes.verify_citations(_cite_state(), get=boom)
+    assert {c["status"] for c in out["citation_checks"].values()} == {citations.UNCHECKED}
+    assert out["gap_candidates"][0]["evidence_level"] == "Moderate"          # unchecked is not verified
+    monkeypatch.setattr(CONFIG, "verify_citations", False)
+    out = nodes.verify_citations(_cite_state())
+    assert all(c["summary"] == "VERIFY_CITATIONS=false" for c in out["citation_checks"].values())
+
+
+def test_search_scope_reports_limits_basis_and_rounds(offline):
+    import evidence
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5)
+    text = "\n".join(evidence.search_scope_lines(evidence.search_scope(state)))
+    for needle in ("**Limits:**", "**Analysed from:** abstract only", "**Search rounds:**", "**User conditions:** none",
+                   "not a systematic literature review"):
+        assert needle in text, needle
+
+
+def test_grounding_flags_invented_references_numbers_and_names(offline, tmp_path):
+    eg = _eval_module("eval_grounding")
+    state = main.run("few-shot named entity recognition in low-resource languages", 2020, 2026, 5)
+    clean = eg.evaluate_state(state, "fake")
+    assert clean["flag_counts"]["reference"] == 0
+    state = dict(state)
+    state["trend_summary"] = ("Most papers report gains of 4 points over fine-tuning. Smith et al. (2017) reached 97.3% "
+                              "on MasakhaNER with XLM-R, see 10.9999/fake.1 for details.")
+    res = eg.evaluate_state(state, "fake")
+    flags = [f for r in res["rows"] for f in r["flags"]]
+    kinds = {k for k, _ in flags}
+    assert {"reference", "year", "number", "name"} <= kinds
+    assert ("number", "4 points") not in flags                  # "4 points" is in a fake abstract ("by 4 points")
+    assert any(v.startswith("DOI 10.9999") for k, v in flags) and ("number", "97.3%") in flags
+    sheet = tmp_path / "audit.csv"
+    n = eg.make_audit(res, state, str(sheet), n_random=2)
+    assert n >= 1
+    import csv
+    rows = list(csv.reader(sheet.open(encoding="utf-8")))
+    for i, r in enumerate(rows[1:]):
+        r[-3:] = ["no", "invented", "A"] if i == 0 else ["yes", "", "A"]
+    with sheet.open("w", encoding="utf-8", newline="") as f:
+        csv.writer(f).writerows(rows)
+    score = eg.score_audit(str(sheet))
+    assert score["n_labelled"] == n and score["unsupported_rate"] == round(1 / n, 3)

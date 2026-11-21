@@ -9,6 +9,7 @@ import logging
 import re
 import time
 
+import conditions
 import embeddings
 import evidence
 import links
@@ -57,21 +58,58 @@ def sanitize_input(state: AgentState) -> dict:
     extraction, then the decision model (decision_model/sensitive_info.dmn.json) decides per
     entity (entity_action) and for the whole input (input_action). Only the redacted topic is
     kept in state."""
+    global _RUN_STARTED
+    _RUN_STARTED = time.monotonic()
     privacy.reset_run()
     source_net.reset_run()
     result = privacy.sanitize_topic(state["research_topic"])
     d = result["decision"]
     logger.info("Input decision: %s (rule %s) - %d entity decision(s)%s", d["action"], d["rule"],
                 len(result["records"]), f" - {d['message']}" if d.get("message") else "")
-    for r in result["records"]:
+    cond, cond_records = _sanitize_conditions(state.get("search_conditions"))
+    records = result["records"] + cond_records
+    for r in records:
         logger.info("  [privacy] %s %s role=%s by=%s conf=%.2f -> %s (rule %s)", r["type"], r["masked"],
                     r["role"], r["detected_by"], r["confidence"], r["action"], r["rule"])
+    if not conditions.is_empty(cond):
+        logger.info("User conditions: %s", " · ".join(conditions.describe(cond)))
     return {
         "research_topic": result["topic"] if d["action"] != "REJECT" else "[REJECTED INPUT]",
         "input_decision": d,
-        "privacy_log": result["records"],
+        "search_conditions": cond,
+        "privacy_log": records,
         "tool_trace": [],
     }
+
+
+def _sanitize_conditions(raw) -> tuple:
+    """User conditions are user input too: the focus text gets the same regex + LLM + decision-model
+    check as the topic, include/exclude terms the regex detectors. Only the redacted form is kept."""
+    if not raw:
+        return conditions.normalize(), []
+    cond = raw if {"focus", "include", "exclude"} <= set(raw) else conditions.normalize(
+        raw.get("focus", ""), raw.get("include"), raw.get("exclude"))
+    cond = conditions.normalize(cond.get("focus", ""), cond.get("include"), cond.get("exclude"))
+    records = []
+    if cond["focus"]:
+        text, recs = privacy.sanitize(cond["focus"], channel="user_input", where="search_conditions.focus", use_llm=True)
+        cond["focus"] = privacy.strip_placeholders(text)
+        records += recs
+    for key in ("include", "exclude"):
+        clean = []
+        for item in cond[key]:
+            alts = item if isinstance(item, list) else [item]
+            kept = []
+            for a in alts:
+                text, recs = privacy.sanitize(a, channel="user_input", where=f"search_conditions.{key}", use_llm=False)
+                records += recs
+                text = privacy.strip_placeholders(text).strip()
+                if len(text) >= 2:
+                    kept.append(text.lower())
+            if kept:
+                clean.append(kept if isinstance(item, list) else kept[0])
+        cond[key] = clean
+    return cond, records
 
 
 def route_after_input(state: AgentState) -> str:
@@ -83,23 +121,40 @@ def route_after_input(state: AgentState) -> str:
 # ---------------------------------------------------------------------------
 def generate_keywords(state: AgentState) -> dict:
     prior = state.get("prior_queries_tried", [])
-    retry_context = ""
-    if prior:
+    retry_context, mode, update = "", "initial", {}
+    prior_list = "\n".join(f"- {q}" for q in prior)
+    if prior and state.get("search_verdict") == "too_broad":
+        # Node 4 "too broad" rule: more specific queries. The loosely related candidates are dropped
+        # from the pool (only those that passed the cut-off stay), so the new, specific results fit.
+        mode = "narrow"
+        scope = state.get("last_round_scope") or {}
+        on_topic = [p.get("title") for p in (state.get("ranked_papers") or [])[:5] if p.get("title")]
+        logger.info("Regenerating keywords (narrow #%d) — previous search too broad (%d/%d passed the cut-off)",
+                    state.get("narrow_count", 0), scope.get("n_passed", 0), scope.get("n_candidates", 0))
+        retry_context = prompts.NARROW_CONTEXT_TEMPLATE.format(
+            n_candidates=scope.get("n_candidates", 0), n_passed=scope.get("n_passed", 0),
+            pass_rate=scope.get("pass_rate", 0.0), prior_queries=prior_list,
+            on_topic_titles="\n".join(f"- {t}" for t in on_topic) or "- (none passed)")
+        update["candidate_papers"] = list(state.get("ranked_papers") or [])
+    elif prior:
+        mode = "broaden"
         logger.info("Regenerating keywords (retry #%d) — avoiding %d previously tried queries",
                     state.get("retry_count", 0), len(prior))
-        retry_context = prompts.RETRY_CONTEXT_TEMPLATE.format(prior_queries="\n".join(f"- {q}" for q in prior))
+        retry_context = prompts.RETRY_CONTEXT_TEMPLATE.format(prior_queries=prior_list)
     else:
         logger.info("Generating search keywords for topic: %r", state["research_topic"])
 
     prompt = prompts.KEYWORD_GEN_PROMPT.format(topic=privacy.strip_placeholders(state["research_topic"]),
+                                               conditions=conditions.prompt_block(state.get("search_conditions")),
                                                retry_context=retry_context)
     result = llm_client.call_json(prompt, tier="fast", schema=KeywordOutput, purpose="generate-search-queries")
     queries = result["queries"]
     logger.info("Generated %d search queries: %s", len(queries), queries)
 
     rounds = list(state.get("search_rounds") or [])
-    rounds.append({"round": len(rounds) + 1, "planned_queries": queries})
+    rounds.append({"round": len(rounds) + 1, "mode": mode, "planned_queries": queries})
     return {
+        **update,
         "search_queries": queries,
         "prior_queries_tried": prior + queries,
         "search_rounds": rounds,   # one entry per search round - evaluation/eval_query_adaptation.py
@@ -121,8 +176,9 @@ def search_sources(state: AgentState) -> dict:
                 len(queries), ", ".join(ctx.enabled_sources), ctx.budget)
     prompt = prompts.SEARCH_AGENT_PROMPT.format(
         topic=privacy.strip_placeholders(state["research_topic"]), year_from=state.get("year_from") or "any",
+        conditions=conditions.prompt_block(state.get("search_conditions")),
         year_to=state.get("year_to") or "any", sources=", ".join(ctx.enabled_sources) + " (or 'all')",
-        queries="\n".join(f"- {q}" for q in queries), budget=ctx.budget,
+        queries="\n".join(f"- {q}" for q in queries), budget=ctx.budget, pool=CONFIG.max_candidate_papers,
     )
     result = llm_client.run_tool_loop(prompts.SEARCH_AGENT_SYSTEM, prompt, tools.SEARCH_TOOLS, ctx.execute,
                                       tier="fast", agent_name="search_agent",
@@ -137,7 +193,7 @@ def search_sources(state: AgentState) -> dict:
         logger.warning("Search agent made no successful tool calls - harness fallback: running suggested queries")
         for q in queries:
             text, entry = ctx.execute("search_papers", {"query": q, "source": "all",
-                                                         "limit": max(10, CONFIG.max_candidate_papers // max(len(queries), 1))})
+                                                         "limit": max(5, CONFIG.max_candidate_papers // max(len(queries), 1))})
             trace.append({"agent": "harness_fallback", "step": 0, "tool_name": "search_papers",
                           "arguments": {"query": q, "source": "all"}, "result_preview": text[:1500],
                           "result_chars": len(text), **entry})
@@ -171,9 +227,13 @@ def search_sources(state: AgentState) -> dict:
 # Node 3 — Relevance Filtering & Ranking
 # ---------------------------------------------------------------------------
 def filter_and_rank(state: AgentState) -> dict:
-    logger.info("Ranking %d candidate papers by embedding similarity to the topic",
-                len(state["candidate_papers"]))
-    ranked = embeddings.rank_by_similarity(state["research_topic"], state["candidate_papers"])
+    cond = state.get("search_conditions")
+    candidates, excluded = conditions.apply(state["candidate_papers"], cond)
+    if excluded:
+        logger.info("User conditions dropped %d/%d candidates (e.g. %s)", len(excluded),
+                    len(state["candidate_papers"]), excluded[0]["reason"])
+    logger.info("Ranking %d candidate papers by embedding similarity to the topic", len(candidates))
+    ranked = embeddings.rank_by_similarity(state["research_topic"], candidates)
     above_threshold = embeddings.filter_by_threshold(ranked)
     logger.info("%d/%d papers passed similarity threshold %.2f (%s)",
                 len(above_threshold), len(ranked), embeddings.ranking_threshold(), CONFIG.ranking_embedding)
@@ -187,27 +247,71 @@ def filter_and_rank(state: AgentState) -> dict:
     selected = above_threshold[:budget]
     logger.info("Selected top %d papers for deep analysis (budget: %d)", len(selected), budget)
     rounds = [dict(r) for r in (state.get("search_rounds") or [{"round": 1}])]
-    rounds[-1].update({"n_passed_cutoff": len(above_threshold), "n_selected": len(selected)})
-    return {"ranked_papers": above_threshold, "selected_papers": selected, "search_rounds": rounds}
+    rounds[-1].update({"n_passed_cutoff": len(above_threshold), "n_selected": len(selected),
+                       "n_excluded_by_conditions": len(excluded)})
+    return {"ranked_papers": above_threshold, "selected_papers": selected, "search_rounds": rounds,
+            "excluded_by_conditions": excluded}
 
 
 # ---------------------------------------------------------------------------
 # Node 4 — Sufficiency Check (conditional edge, no LLM call)
 # ---------------------------------------------------------------------------
 def check_sufficiency(state: AgentState) -> dict:
+    """Judges the search round from counts only (no LLM): "sufficient", "too_few" or "too_broad".
+
+    too_broad - the candidate pool is full (>= MAX_CANDIDATE_PAPERS) but fewer than BROAD_MAX_PASS_RATE
+                of the candidates passed the relevance cut-off: the queries were too general, so
+                Node 1 is asked for more specific ones (at most MAX_NARROW_LOOPS times). Checked first.
+    too_few   - fewer selected papers than min(MIN_PAPERS_BEFORE_RETRY, max_papers), or fewer
+                candidates than MIN_CANDIDATE_PAPERS while the max_papers budget is not filled:
+                Node 1 is asked for broader queries.
+    """
     retry_count = state.get("retry_count", 0)
+    narrow_count = state.get("narrow_count", 0)
     n_selected = len(state.get("selected_papers", []))
+    n_candidates = len(state.get("candidate_papers") or [])
+    n_after_conditions = n_candidates - len(state.get("excluded_by_conditions") or [])
+    n_passed = len(state.get("ranked_papers") or [])
+    pass_rate = n_passed / n_after_conditions if n_after_conditions else 0.0
     # Live-run bug: with --max-papers 4 and MIN_PAPERS_BEFORE_RETRY=5 the check could never pass,
     # so every run burned all retry loops. You can't need more papers than you're allowed to select.
     need = min(CONFIG.min_papers_before_retry, state.get("max_papers") or CONFIG.max_deep_analysis_papers)
-    sufficient = n_selected >= need
-    logger.info("Sufficiency check: %d selected papers (need >= %d) -> %s",
-                n_selected, need, "sufficient" if sufficient else "INSUFFICIENT")
-    return {"sufficient": sufficient, "retry_count": retry_count + (0 if sufficient else 1)}
+    min_pool = min(CONFIG.min_candidate_papers, CONFIG.max_candidate_papers)
+    budget = state.get("max_papers") or CONFIG.max_deep_analysis_papers
+
+    too_broad = (n_candidates >= CONFIG.max_candidate_papers and pass_rate < CONFIG.broad_max_pass_rate
+                 and narrow_count < CONFIG.max_narrow_loops)
+    if too_broad:
+        verdict = "too_broad"
+    elif n_selected >= need and (n_candidates >= min_pool or n_selected >= budget):
+        # a short candidate pool only matters while the paper budget is not filled yet
+        verdict = "sufficient"
+    else:
+        verdict = "too_few"
+    logger.info("Sufficiency check: %d candidates (pool %d, need >= %d), %d passed the cut-off (%.0f%%), "
+                "%d selected (need >= %d) -> %s", n_candidates, CONFIG.max_candidate_papers, min_pool,
+                n_passed, pass_rate * 100, n_selected, need, verdict.upper())
+    rounds = [dict(r) for r in (state.get("search_rounds") or [{"round": 1}])]
+    rounds[-1]["verdict"] = verdict
+    return {
+        "sufficient": verdict == "sufficient",
+        "search_verdict": verdict,
+        "search_rounds": rounds,
+        "last_round_scope": {"n_candidates": n_candidates, "n_passed": n_passed, "pass_rate": round(pass_rate, 3)},
+        "retry_count": retry_count + (1 if verdict == "too_few" else 0),
+        "narrow_count": narrow_count + (1 if verdict == "too_broad" else 0),
+    }
+
+
+_RUN_STARTED = time.monotonic()   # reset by sanitize_input (Node 0) at the start of every run
 
 
 def _run_tokens() -> float:
     return metrics.get("input_tokens") + metrics.get("output_tokens")
+
+
+def run_seconds() -> float:
+    return time.monotonic() - _RUN_STARTED
 
 
 def token_budget_used_up() -> bool:
@@ -215,15 +319,31 @@ def token_budget_used_up() -> bool:
     return CONFIG.max_run_tokens > 0 and _run_tokens() >= CONFIG.max_run_tokens
 
 
+def run_budget_exceeded() -> str:
+    """Why the run's budget is used up ("" = not used up): tokens (MAX_RUN_TOKENS) or wall-clock
+    seconds (MAX_RUN_SECONDS). Checked before every optional, repeatable step."""
+    if token_budget_used_up():
+        return f"token budget MAX_RUN_TOKENS={CONFIG.max_run_tokens} used up ({int(_run_tokens())} tokens)"
+    if CONFIG.max_run_seconds > 0 and run_seconds() >= CONFIG.max_run_seconds:
+        return f"time budget MAX_RUN_SECONDS={CONFIG.max_run_seconds} used up ({run_seconds():.0f} s)"
+    return ""
+
+
 def route_after_sufficiency(state: AgentState) -> str:
     """Conditional-edge function passed to graph.add_conditional_edges (see graph.py)."""
-    if state.get("sufficient"):
+    verdict = state.get("search_verdict") or ("sufficient" if state.get("sufficient") else "too_few")
+    if verdict == "sufficient":
         return "extract"
-    if token_budget_used_up():
-        metrics.inc("token_budget_stopped_retry")
-        logger.warning("Token budget MAX_RUN_TOKENS=%d used up (%d tokens) - no retry loop; proceeding with %d papers.",
-                       CONFIG.max_run_tokens, _run_tokens(), len(state.get("selected_papers", [])))
+    over = run_budget_exceeded()
+    if over:
+        metrics.inc("token_budget_stopped_retry" if "token" in over else "time_budget_stopped_retry")
+        logger.warning("%s - no further search loop; proceeding with %d papers.", over,
+                       len(state.get("selected_papers", [])))
         return "extract"
+    if verdict == "too_broad":
+        logger.info("Search too broad -> looping back for more specific queries (narrow %d/%d)",
+                    state.get("narrow_count", 0), CONFIG.max_narrow_loops)
+        return "narrow"
     if state.get("retry_count", 0) >= CONFIG.max_retry_loops:
         logger.warning("Hit max retry loops (%d) with only %d papers; proceeding anyway.",
                         CONFIG.max_retry_loops, len(state.get("selected_papers", [])))
@@ -563,6 +683,7 @@ def analyze_gaps(state: AgentState) -> dict:
     logger.info("Proposing candidate research gaps from the comparison table + trends...")
     prompt = prompts.GAP_ANALYSIS_PROMPT.format(
         topic=state["research_topic"],
+        conditions=conditions.prompt_block(state.get("search_conditions")),
         comparison_table=state["comparison_table"],
         trend_summary=state["trend_summary"],
     )
@@ -596,13 +717,13 @@ def analyze_gaps(state: AgentState) -> dict:
                         i, len(raw_candidates), len(supporting_ids), CONFIG.min_supporting_papers_for_gap, claim_preview)
             continue  # structural rule from architecture doc §7.3 — reject weakly-evidenced gaps
 
-        if token_budget_used_up():
-            metrics.inc("token_budget_skipped_verifier")
-            logger.warning("  [%d/%d] Token budget MAX_RUN_TOKENS=%d used up - gap kept but NOT verified: %r",
-                           i, len(raw_candidates), CONFIG.max_run_tokens, claim_preview)
-            verdict = {"supported": False, "notes": "not verified: run token budget used up",
+        over = run_budget_exceeded()
+        if over:
+            metrics.inc("token_budget_skipped_verifier" if "token" in over else "time_budget_skipped_verifier")
+            logger.warning("  [%d/%d] %s - gap kept but NOT verified: %r", i, len(raw_candidates), over, claim_preview)
+            verdict = {"supported": False, "notes": f"not verified: run {over.split(' MAX_')[0]} used up",
                        "unsupported_aspects": "unknown",
-                       "decision_reason": f"token budget MAX_RUN_TOKENS={CONFIG.max_run_tokens} used up - not verified"}
+                       "decision_reason": f"{over} - not verified"}
             read_ids, corpus_searches = [], []
         else:
             logger.info("  [%d/%d] Verifying with tools (%d supporting papers): %r",
@@ -708,6 +829,60 @@ def analyze_gaps(state: AgentState) -> dict:
     logger.info("Gap analysis complete: %d/%d candidates passed verification", len(verified), len(raw_candidates))
     return {"gap_candidates": verified, "tool_trace": trace,
             "privacy_log": (state.get("privacy_log") or []) + early_privacy}
+
+
+# ---------------------------------------------------------------------------
+# Node 7b — Citation check before the report (citations.py, no LLM)
+# ---------------------------------------------------------------------------
+def verify_citations(state: AgentState, get=None) -> dict:
+    """Looks up every paper the gaps cite in Crossref (and OpenAlex for non-OpenAlex papers) and
+    compares title / year / DOI. A gap whose supporting citations do not all check out cannot be
+    Strong. `get` is the HTTP getter (tests pass a fake one)."""
+    import citations
+    gaps = [dict(g) for g in state.get("gap_candidates") or []]
+    papers = {p["id"]: p for p in (state.get("selected_papers") or []) if p.get("id")}
+    for g in gaps:
+        cp = g.get("counterexample_paper") or {}
+        if cp.get("id") and cp["id"] not in papers:
+            papers[cp["id"]] = cp
+    ids = citations.cited_paper_ids(gaps)
+    checks = {}
+    if not CONFIG.verify_citations:
+        logger.info("Citation check off (VERIFY_CITATIONS=false) - %d cited papers left unchecked", len(ids))
+        checks = {pid: {"status": citations.UNCHECKED, "checks": [], "summary": "VERIFY_CITATIONS=false"} for pid in ids}
+    else:
+        get = get or citations.http_getter(CONFIG.citation_timeout)
+        logger.info("Checking %d cited papers against Crossref/OpenAlex", len(ids))
+        for pid in ids:
+            over = run_budget_exceeded()
+            if over and "time" in over:
+                checks[pid] = {"status": citations.UNCHECKED, "checks": [], "summary": over}
+                continue
+            paper = papers.get(pid) or {"id": pid}
+            checks[pid] = citations.check_paper(paper, citations.lookups_for(paper, get, CONFIG), CONFIG.citation_title_sim)
+            metrics.inc(f"citation_{checks[pid]['status']}")
+            logger.info("  %s %s - %s", citations.STATUS_MARK[checks[pid]["status"]], pid, checks[pid]["summary"])
+    # remote titles are not kept (they may carry names); only status, counts and the short summary
+    for c in checks.values():
+        for r in c.get("checks", []):
+            r.pop("remote_title", None)
+
+    for g in gaps:
+        summary = citations.gap_citation_summary(g, checks)
+        g["citation_check"] = summary
+        g["supporting_papers"] = [{**sp, "citation_status": (checks.get(sp.get("id")) or {}).get("status", citations.UNCHECKED)}
+                                  for sp in g.get("supporting_papers") or []]
+        reason = citations.cap_reason(summary)
+        if reason:
+            if g.get("evidence_level") == evidence.STRONG:
+                logger.info("  gap capped below Strong: %s", reason)
+                g["evidence_level"] = g["confidence_level"] = evidence.MODERATE
+            if g.get("evidence_level") != evidence.LIMITED:
+                g["evidence_level_reasons"] = list(g.get("evidence_level_reasons") or []) + [reason]
+            g["confidence_caps"] = list(g.get("confidence_caps") or []) + [reason]
+    n_ok = sum(1 for c in checks.values() if c["status"] in citations.OK_STATUSES)
+    logger.info("Citation check: %d/%d cited papers checked out", n_ok, len(checks))
+    return {"gap_candidates": gaps, "citation_checks": checks}
 
 
 # ---------------------------------------------------------------------------

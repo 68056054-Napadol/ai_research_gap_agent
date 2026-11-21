@@ -25,8 +25,76 @@ reference to compare with.
 | 5 | Gap quality vs human answers | — (worksheet below) | Human | reference gaps per topic + rating per proposed gap |
 | 6 | Evidence-level calibration | — (worksheet below, uses §5 ratings) | Human | §5 ratings |
 | 7 | Reliability, privacy & cost | `consistency_test.py`, `compare_models.py`, test suite | Auto | none |
+| 8 | Grounding: no invented papers / DOIs / results | `eval_grounding.py` | Auto + Human | label the sentences in the audit sheet (supported / partly / no) |
+
+Order of work: §0 (run the test set once) → §1–§8 on those saved runs → fill the targets table below.
 
 Result files go to `evaluation/results/` (`.md` is committed, `.json` is git-ignored).
+
+---
+
+## 0. Test set and frozen runs — do this first
+
+**Topics** (`data/test_topics.json`, chosen before any result was seen):
+
+| id | split | topic | years | conditions | what it tests | owner / 2nd annotator |
+|---|---|---|---|---|---|---|
+| T1 | dev | few-shot named entity recognition in low-resource languages | 2021–2026 | – | normal path; has ranking labels | A / B |
+| T2 | dev | automatic short answer grading with large language models | 2022–2026 | – | normal path; has ranking labels | B / C |
+| T3 | test | hallucination detection in retrieval-augmented generation | 2023–2026 | – | **too broad → narrow** rule | C / A |
+| T4 | test | abstractive text summarization for the Thai language | 2018–2026 | – | **too few → broaden** rule; thin evidence | A / C |
+| T5 | test | clinical named entity recognition with transformer models | 2020–2026 | include `clinical\|medical\|biomedical`, exclude `survey, review`, focus EHR / clinical notes | **user conditions**; well-defined datasets; journal DOIs | B / A |
+| T6 | test | automatic evaluation metrics for machine translation | 2021–2026 | exclude `survey` | extraction of metrics/datasets; numbers in the answer | C / B |
+| T7 | test | few-shot named entity recognition for Lao legal contracts | 2018–2026 | – | stress: almost nothing exists → stop conditions, nothing invented | anyone |
+
+Why these: two dev topics already have ranking labels (tune prompts/thresholds only on them); the
+five test topics each force one decision rule (narrow, broaden, conditions, stop) and differ in how
+much literature exists, so the evidence levels and the grounding check are tried on thick and thin
+evidence. Seven topics × ~10 papers ≈ 70 analysed papers — enough to compare parts of the system,
+still a small sample: report results per topic, not just one average.
+
+**Frozen runs:** `python evaluation/run_test_set.py` (real backend, settings in the file's
+`frozen_settings`; the script warns when `.env` differs). It saves
+`output/testset_<id>_<time>_state.json` + report. **Every** human task below uses these files; do
+not re-run a topic between annotators (a new run can pick different papers). If a run fails or is
+re-run, write down why in the table at the end.
+
+**Blind order:** for §3 and §5, the annotator reads the papers and writes their own answer
+**before** opening the system's report for that topic.
+
+**Workload** (3 members, ~2 h each): per owned topic — ranking labels (~30 candidates, 20 min), extraction
+gold for 4 papers (60 min), 2–4 reference gaps (20 min), rate the proposed gaps (15 min), grounding
+audit sheet (~15 sentences, 15 min). Second annotator: extraction gold for 2 of the 4 papers + gap
+ratings, for agreement.
+
+### Targets (written before results — change only with a reason recorded here)
+
+| # | Measure | Target | Result |
+|---|---|---|---|
+| 1 | precision@10 of the ranking, per test topic | ≥ 0.70 | |
+| 2 | narrow rule fires on T3 and p@10 after narrowing ≥ before; broaden rule fires on T4 and the pool grows | yes / yes | |
+| 3 | extraction judged correct by the annotator (method, dataset, findings), per field | ≥ 0.80 | |
+| 3 | inter-annotator agreement on the same fields (token F1 between the 2 annotators) | report (ceiling) | |
+| 4 | cited papers `verified` or `title_only` in the run's own citation check | ≥ 0.95, every mismatch explained | |
+| 5 | proposed gaps rated real (yes / partly) | ≥ 0.60 | |
+| 5 | mean "evidence supports claim" (1–5) | ≥ 3.5 | |
+| 6 | share rated real: Strong ≥ Moderate ≥ Limited | ordering holds | |
+| 7 | runs within `MAX_RUN_TOKENS` / `MAX_RUN_SECONDS`; time and tokens per topic reported | all | |
+| 8 | invented references in the answer (DOIs / ids / "X et al." outside the analysed set) | 0 | |
+| 8 | sentences rated "no" (not supported) in the grounding audit | ≤ 0.10 | |
+| 8 | invented numbers confirmed by the audit | 0 | |
+
+### Rating rubric (§5 and §8)
+
+- **Real gap in these papers** — yes: the analysed papers show the thing is missing and none of them does it;
+  partly: true but already partly done by one paper, or only for a narrower setting; no: one of the
+  papers already does it, or the papers do not concern it.
+- **Evidence supports claim (1–5)** — 5: every cited paper clearly backs its part; 3: the claim is
+  plausible but one cited paper is only loosely related; 1: the cited papers do not support it.
+- **Novelty (1–5)** — 5: not an obvious next step; 1: restates a limitation the papers already list as future work.
+- **Actionability (1–5)** — 5: a student could start a project from it; 1: too vague to act on.
+- **Grounding sentence** — yes: every fact in the sentence is in the cited papers' text; partly: the
+  gist is there but a detail (number, qualifier, name) is not; no: a fact is not in the papers.
 
 ---
 
@@ -57,7 +125,8 @@ Every report now has a *Search scope* section (sources asked / answered / failed
 years, candidate → cut-off → selected → analysed counts, full text vs abstract, skipped papers).
 `eval_query_adaptation.py` runs deliberately narrow topics and measures from `search_rounds`
 whether the retry loop fired, whether later rounds used new queries, and whether the paper pool
-grew.
+grew. Each round now records its `mode` (initial / broaden / narrow) and `verdict` (too_few /
+too_broad / sufficient); T3 should show a narrow round, T4 broaden rounds (§0 targets).
 
 ```
 python evaluation/eval_query_adaptation.py --offline        # smoke test only (fake papers)
@@ -118,6 +187,11 @@ Summary to fill in:
 
 ## 6. Evidence-level calibration — Human (uses §5)
 
+Note before starting: in the 32 runs up to 21 Nov 2026 no gap reached Strong (0 / 98), partly
+because "Strong" needed ≥ 2 answering sources, which the single-source MVP can never meet — that
+default is now 1 (`HIGH_CONFIDENCE_MIN_SOURCES`). If the test set still gives no Strong gap, the table
+below can only compare Moderate with Limited; say so rather than loosening the criteria on the test topics.
+
 Do gaps the system marks **Strong** hold up better under the §5 ratings than **Moderate** and
 **Limited** ones? The levels come from the pre-written criteria in `config.py` / README
 "Evidence levels"; if the table below shows no difference, change the criteria in `config.py`
@@ -137,10 +211,50 @@ and say so in the report (do not tune them on the same topics you then report).
 - Privacy & secrets: `python -m pytest -q tests` (no author name / e-mail / API key in state,
   report, trace or run log; decision-table rules).
 - Cost & latency per run: `run_info.seconds` and `run_metrics` (llm_calls, input/output tokens)
-  in each `output/*_state.json`, also on the Dashboard's Runs table. `MAX_RUN_TOKENS` caps a run.
+  in each `output/*_state.json`, also on the Dashboard's Runs table and in every report's *Search
+  scope → Limits* line. `MAX_RUN_TOKENS` (default 250k) and `MAX_RUN_SECONDS` (default 1800) cap a
+  run; `run_test_set.py` prints time and tokens per topic.
 
 | Topic | Papers analysed | Wall-clock time | LLM calls | Tokens (in / out) |
 |---|---|---|---|---|
 | | | | | |
 
 This table is also the evidence for the paper-count budget (architecture doc §7.4).
+
+## 8. Grounding: no invented papers, DOIs or results — Auto + Human
+
+What the run already guarantees: papers come only from the search API, cited ids not among the
+analysed papers are dropped (`dropped_ids`, = `gap_ids_hallucinated` in `compare_models.py`), and every
+cited paper's title / year / DOI is checked against Crossref/OpenAlex before the report
+(`citation_checks`, §4). What can still be invented is in the **free text** the user reads (trend
+summary, gap claims, rationales, verifier notes). `eval_grounding.py` checks it against the analysed
+papers' title, abstract, full text, extraction and the comparison table:
+
+| Check | Flags | Meaning |
+|---|---|---|
+| A. references | DOI / arXiv id / source id not of an analysed paper; "Name et al." | refers to a paper outside the set — **must be 0** |
+| B. years | "(2019)" not the year of any analysed paper | possibly a paper outside the set |
+| C. numbers | % and decimals not in the corpus | possibly an invented result |
+| D. names | acronyms / CamelCase / names with digits not in the corpus | possibly an invented dataset or method |
+
+```
+python evaluation/eval_grounding.py --states output/testset_*_state.json            # automatic flags
+python evaluation/eval_grounding.py --states output/testset_*_state.json --make-audit   # sheets for people
+python evaluation/eval_grounding.py --audit evaluation/data/grounding_audit_*.csv     # after labelling
+```
+
+**Human TODO:** each audit sheet holds every flagged sentence plus 10 random unflagged ones. Open the
+cited papers (the `cited_papers` column) and label each sentence yes / partly / no with the rubric in
+§0, noting what is not supported. The score reports the unsupported rate, the rate among flagged vs
+unflagged sentences (do the flags find the problems?) and how many unsupported sentences the flags
+missed — if that number is high, the automatic check is not enough on its own and the report must say so.
+
+| Topic | Sentences audited | Flagged | Rated "no" | "no" among unflagged | Invented references | Invented numbers |
+|---|---|---|---|---|---|---|
+| | | | | | | |
+
+## Runs used
+
+| Topic | state file | backend / models | settings differing from frozen | notes (re-runs, failures) |
+|---|---|---|---|---|
+| | | | | |

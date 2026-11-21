@@ -30,8 +30,11 @@ import time
 
 import streamlit as st
 
+import citations
+import conditions
 import embeddings
 import evidence
+import nodes
 import links
 import metrics
 import outbound
@@ -51,17 +54,18 @@ PAPER_BOX_HEIGHT = 180
 # ---------------------------------------------------------------------------
 NODE_ORDER = [
     "sanitize_input", "generate_keywords", "search_sources", "filter_and_rank", "check_sufficiency",
-    "extract_paper_data", "compare_papers", "analyze_gaps", "privacy_guard",
+    "extract_paper_data", "compare_papers", "analyze_gaps", "verify_citations", "privacy_guard",
 ]
 NODE_META = {
     "sanitize_input": ("🛡️", "Privacy check on input (LLM + decision model)"),
     "generate_keywords": ("🔑", "Generate search keywords"),
     "search_sources": ("🔍", "Search agent (LLM tool calling: search_papers)"),
     "filter_and_rank": ("📊", "Rank papers by relevance"),
-    "check_sufficiency": ("✅", "Check if enough papers found"),
+    "check_sufficiency": ("✅", "Check the search: too few / too broad / sufficient"),
     "extract_paper_data": ("📄", "Extract data from each paper"),
     "compare_papers": ("🔬", "Compare papers & synthesize trends"),
     "analyze_gaps": ("💡", "Propose potential research gaps + verifier agent (tools: get_paper_text, search_corpus)"),
+    "verify_citations": ("📚", "Check cited papers against Crossref / OpenAlex"),
     "privacy_guard": ("🛡️", "Privacy guard on final answer"),
 }
 # Linear "what runs next" edges. check_sufficiency is conditional (handled specially below) and
@@ -73,8 +77,20 @@ NEXT_NODE = {
     "filter_and_rank": "check_sufficiency",
     "extract_paper_data": "compare_papers",
     "compare_papers": "analyze_gaps",
-    "analyze_gaps": "privacy_guard",
+    "analyze_gaps": "verify_citations",
+    "verify_citations": "privacy_guard",
 }
+def _after_sufficiency(update: dict, acc: dict) -> str:
+    """Which card runs after check_sufficiency - mirrors nodes.route_after_sufficiency without its
+    side effects (it counts budget stops in metrics)."""
+    verdict = update.get("search_verdict") or ("sufficient" if update.get("sufficient") else "too_few")
+    if verdict == "sufficient" or nodes.run_budget_exceeded():
+        return "extract_paper_data"
+    if verdict == "too_broad":
+        return "generate_keywords"
+    return "extract_paper_data" if update.get("retry_count", 0) >= CONFIG.max_retry_loops else "generate_keywords"
+
+
 def source_health_line(health: dict) -> str:
     """'Sources: arxiv ✅ 5 · semantic_scholar ⛔ rate limited ...' for the search card and report."""
     if not health:
@@ -134,7 +150,8 @@ def _summarize_input(node_key: str, acc: dict) -> str:
         return f"{n} candidate papers to rank by similarity to the topic"
     if node_key == "check_sufficiency":
         n = len(acc.get("selected_papers") or [])
-        return f"{n} papers selected so far (need ≥ {CONFIG.min_papers_before_retry})"
+        return (f"{n} papers selected so far (need ≥ {CONFIG.min_papers_before_retry}), "
+                f"{len(acc.get('candidate_papers') or [])} candidates (need ≥ {CONFIG.min_candidate_papers}, pool ≤ {CONFIG.max_candidate_papers})")
     if node_key == "extract_paper_data":
         n = len(acc.get("selected_papers") or [])
         return f"{n} papers to extract method/dataset/findings from"
@@ -143,6 +160,8 @@ def _summarize_input(node_key: str, acc: dict) -> str:
         return f"{n} extracted papers to compare"
     if node_key == "analyze_gaps":
         return "Comparison table + cross-paper trend summary"
+    if node_key == "verify_citations":
+        return f"{len(citations.cited_paper_ids(acc.get('gap_candidates')))} cited papers to look up"
     return ""
 
 
@@ -171,11 +190,26 @@ def _summarize_output(node_key: str, update: dict, acc: dict) -> str:
         return (f"**{len(ranked)}** passed the relevance cut-off ({embeddings.ranking_threshold():.2f}, "
                 f"`{CONFIG.ranking_embedding}`) — top **{len(sel)}** selected for deep analysis")
     if node_key == "check_sufficiency":
+        sc = update.get("last_round_scope") or {}
+        counts = f" ({sc.get('n_passed', 0)}/{sc.get('n_candidates', 0)} candidates passed the cut-off)"
+        nxt = _after_sufficiency(update, acc)
         if update.get("sufficient"):
-            return "Sufficient papers found — proceeding to extraction"
-        if update.get("retry_count", 0) >= CONFIG.max_retry_loops:
-            return f"Still short on papers after {CONFIG.max_retry_loops} retries — proceeding anyway"
-        return "Not enough papers yet — retrying with broader keywords"
+            return "Sufficient papers found — proceeding to extraction" + counts
+        over = nodes.run_budget_exceeded()
+        if over:
+            return f"Search not sufficient but {over} — proceeding with what was found" + counts
+        if update.get("search_verdict") == "too_broad":
+            return "Results too broad — retrying with more specific queries" + counts
+        if nxt == "extract_paper_data":
+            return f"Still short on papers after {CONFIG.max_retry_loops} retries — proceeding anyway" + counts
+        return "Not enough papers yet — retrying with broader keywords" + counts
+    if node_key == "verify_citations":
+        checks = update.get("citation_checks") or {}
+        counts = {}
+        for c in checks.values():
+            counts[c["status"]] = counts.get(c["status"], 0) + 1
+        return (f"**{len(checks)}** cited papers checked: "
+                + (", ".join(f"{citations.STATUS_MARK[k]} {k} {v}" for k, v in sorted(counts.items())) or "none"))
     if node_key == "extract_paper_data":
         n = len(update.get("paper_extracts") or [])
         skipped = update.get("skipped_papers") or []
@@ -319,13 +353,20 @@ with st.sidebar:
 
     st.divider()
     CONFIG.max_deep_analysis_papers = st.slider(
-        "Papers to deep-analyze", min_value=3, max_value=40, value=min(CONFIG.max_deep_analysis_papers, 40),
-        help="Each paper adds roughly 45 s on a local 14B model (PDF + extraction + indexing). "
-             f"Gaps can only reach Strong evidence with >= {CONFIG.high_confidence_min_papers} papers.",
+        "Papers to deep-analyze", min_value=CONFIG.mvp_min_papers, max_value=CONFIG.mvp_max_papers,
+        value=min(max(CONFIG.max_deep_analysis_papers, CONFIG.mvp_min_papers), CONFIG.mvp_max_papers),
+        help=f"MVP scope: {CONFIG.mvp_min_papers}-{CONFIG.mvp_max_papers} papers chosen from up to "
+             f"{CONFIG.max_candidate_papers} candidates - enough for a demo, not a systematic review. "
+             "Each paper adds roughly 45 s on a local 14B model (PDF + extraction + indexing).",
     )
-    source_options = ["semantic_scholar", "arxiv", "openalex"]
-    selected_sources = st.multiselect("Data sources", source_options, default=list(CONFIG.enabled_sources))
-    CONFIG.enabled_sources = tuple(selected_sources) if selected_sources else tuple(source_options)
+    source_options = ["openalex", "semantic_scholar", "arxiv"]
+    selected_sources = st.multiselect(
+        "Data sources", source_options, default=list(CONFIG.enabled_sources),
+        help="MVP: one source (OpenAlex). Adding sources brings duplicates and different data formats; "
+             "the report lists which sources were used.")
+    CONFIG.enabled_sources = tuple(selected_sources) if selected_sources else ("openalex",)
+    if len(CONFIG.enabled_sources) > 1:
+        st.caption("ℹ️ More than one source - outside the single-source MVP scope; say so when reporting results.")
 
     CONFIG.fetch_full_text = st.checkbox(
         "Fetch full-text PDFs", value=CONFIG.fetch_full_text,
@@ -349,8 +390,17 @@ with st.form("run_form", border=False):
     year_to = c2.number_input("Year to", min_value=1990, max_value=2030, value=2026, step=1)
     c3.markdown("<div style='height: 1.75rem'></div>", unsafe_allow_html=True)
     run_clicked = c3.form_submit_button("Run agent", type="primary", use_container_width=True)
-missing_keys = [name for name, key in (("SEMANTIC_SCHOLAR_API_KEY", CONFIG.semantic_scholar_api_key),
-                                       ("OPENALEX_API_KEY", CONFIG.openalex_api_key)) if not key]
+    with st.expander("Conditions (optional)"):
+        focus = st.text_input("Focus", placeholder="e.g. Southeast Asian languages, transformer-based methods",
+                              help="Free text passed to the planning, search and gap steps (privacy-checked like the topic).")
+        d1, d2 = st.columns(2)
+        include_terms = d1.text_input("Papers must mention", placeholder="e.g. NER, Thai|Vietnamese",
+                                      help="Comma = every term required; a|b = either one. Checked on title + abstract by code.")
+        exclude_terms = d2.text_input("Drop papers that mention", placeholder="e.g. survey, review",
+                                      help="Comma-separated. Dropped papers are listed in the report's Search scope.")
+missing_keys = [name for src, name, key in (("semantic_scholar", "SEMANTIC_SCHOLAR_API_KEY", CONFIG.semantic_scholar_api_key),
+                                            ("openalex", "OPENALEX_API_KEY", CONFIG.openalex_api_key))
+                if src in CONFIG.enabled_sources and not key]
 if missing_keys:
     st.caption("⚠️ No " + " / ".join(missing_keys) + " in .env - those sources may be rate limited, which narrows "
                "the search (and caps gap evidence below Strong). Both keys are free; see .env.example.")
@@ -382,8 +432,10 @@ if run_clicked:
             "year_from": int(year_from),
             "year_to": int(year_to),
             "max_papers": CONFIG.max_deep_analysis_papers,
+            "search_conditions": conditions.normalize(focus, include_terms, exclude_terms),
             "prior_queries_tried": [],
             "retry_count": 0,
+            "narrow_count": 0,
         }
 
         # Always capture everything the agent itself logs (no level picker needed) — the only
@@ -501,7 +553,7 @@ if run_clicked:
 
                 # Figure out what runs next (mirrors graph.py's edges, including the retry loop).
                 if node_name == "check_sufficiency":
-                    if node_update.get("sufficient") or node_update.get("retry_count", 0) >= CONFIG.max_retry_loops:
+                    if _after_sufficiency(node_update, acc_state) == "extract_paper_data":
                         next_key = "extract_paper_data"
                     else:
                         next_key = "generate_keywords"
@@ -626,7 +678,9 @@ elif state:
                 st.caption(f"Why not {'Moderate' if level == evidence.LIMITED else 'Strong'}: " + "; ".join(reasons))
             st.write(gap.get("rationale", ""))
             st.markdown("**Supporting papers** (links built from paper metadata, not written by the AI):  \n"
-                        + "  \n".join(f"• {links.markdown_link(sp)}" for sp in gap.get("supporting_papers", [])))
+                        + "  \n".join(f"• {links.markdown_link(sp)} — "
+                                     + citations.status_line((state.get("citation_checks") or {}).get(sp.get("id")))
+                                     for sp in gap.get("supporting_papers", [])))
             st.markdown("**Evidence sentences** (each paper's quote, only when found verbatim in its text):  \n"
                         + "  \n".join(evidence.quote_lines(evidence.quotes_for_saved_gap(gap, state))))
             st.caption(f"Verifier notes: {gap.get('verifier_notes', '')}")

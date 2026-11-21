@@ -21,36 +21,20 @@ paper with the same title (rows marked "by title" - check them by hand).
     python evaluation/eval_citations.py --states output/20261120_011606_state.json --no-crossref
 """
 import argparse
-import difflib
 import glob
 import json
 import os
-import re
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import ROOT, save  # noqa: E402
 
-OPENALEX = "https://api.openalex.org/works"
-CROSSREF = "https://api.crossref.org/works"
-
-
-def norm_title(t: str) -> str:
-    t = re.sub(r"<[^>]+>", " ", t or "")            # Crossref titles can carry <i>..</i>
-    return " ".join(re.sub(r"[^\w\s]", " ", t.lower()).split())
-
-
-def title_similarity(a: str, b: str) -> float:
-    a, b = norm_title(a), norm_title(b)
-    if not a or not b:
-        return 0.0
-    return difflib.SequenceMatcher(None, a, b).ratio()
-
-
-def norm_doi(d: str) -> str:
-    d = (d or "").strip().lower()
-    return re.sub(r"^(https?://(dx\.)?doi\.org/|doi:)", "", d)
+sys.path.insert(0, ROOT)
+# The lookup / comparison functions are shared with the agent's own pre-report check (citations.py,
+# Node 7b verify_citations), so the evaluation measures exactly what the run checked.
+from citations import (CROSSREF, OPENALEX, _crossref_record, _openalex_record, compare, lookup_crossref,  # noqa: E402,F401
+                       lookup_openalex, norm_doi, norm_title, title_similarity)
 
 
 def cited_papers(states: list) -> list:
@@ -75,67 +59,6 @@ def cited_papers(states: list) -> list:
                 out.append({"run_id": run_id, "id": pid, "role": role, "title": p.get("title") or "",
                             "year": p.get("year"), "doi": p.get("doi")})
     return out
-
-
-def _openalex_record(w: dict) -> dict:
-    return {"title": w.get("display_name") or w.get("title") or "", "year": w.get("publication_year"),
-            "doi": norm_doi(w.get("doi"))}
-
-
-def lookup_openalex(paper: dict, get, api_key: str = "") -> tuple:
-    """(record or None, how). `get(url, params)` returns parsed JSON or None."""
-    params = {"api_key": api_key} if api_key else {}
-    if paper.get("doi"):
-        w = get(f"{OPENALEX}/doi:{norm_doi(paper['doi'])}", params)
-        if w and w.get("id"):
-            return _openalex_record(w), "by DOI"
-    if paper["id"].startswith("openalex:"):
-        w = get(f"{OPENALEX}/{paper['id'].split(':', 1)[1]}", params)
-        if w and w.get("id"):
-            return _openalex_record(w), "by OpenAlex id"
-    if paper.get("title"):
-        data = get(OPENALEX, {**params, "search": paper["title"][:300], "per-page": 1})
-        hits = (data or {}).get("results") or []
-        if hits:
-            return _openalex_record(hits[0]), "by title"
-    return None, "not found"
-
-
-def _crossref_record(m: dict) -> dict:
-    year = None
-    for k in ("published-print", "published-online", "issued", "created"):
-        parts = ((m.get(k) or {}).get("date-parts") or [[None]])[0]
-        if parts and parts[0]:
-            year = parts[0]
-            break
-    return {"title": ((m.get("title") or [""])[0]), "year": year, "doi": norm_doi(m.get("DOI"))}
-
-
-def lookup_crossref(paper: dict, get, mailto: str = "") -> tuple:
-    params = {"mailto": mailto} if mailto else {}
-    if paper.get("doi"):
-        data = get(f"{CROSSREF}/{norm_doi(paper['doi'])}", params)
-        if data and data.get("message"):
-            return _crossref_record(data["message"]), "by DOI"
-    if paper.get("title"):
-        data = get(CROSSREF, {**params, "query.bibliographic": paper["title"][:300], "rows": 1})
-        items = ((data or {}).get("message") or {}).get("items") or []
-        if items:
-            return _crossref_record(items[0]), "by title"
-    return None, "not found"
-
-
-def compare(paper: dict, rec: dict | None, title_sim: float) -> dict:
-    if rec is None:
-        return {"found": False}
-    sim = title_similarity(paper.get("title"), rec.get("title"))
-    y1, y2 = paper.get("year"), rec.get("year")
-    d1, d2 = norm_doi(paper.get("doi")), rec.get("doi") or ""
-    return {"found": True, "title_sim": round(sim, 3), "title_match": sim >= title_sim,
-            "year_match": (y1 == y2) if (y1 and y2) else None,
-            "year_within_1": (abs(int(y1) - int(y2)) <= 1) if (y1 and y2) else None,
-            "doi_match": (d1 == d2) if (d1 and d2) else None,
-            "remote_title": rec.get("title"), "remote_year": y2, "remote_doi": d2 or None}
 
 
 def rates(rows: list, key: str) -> dict:

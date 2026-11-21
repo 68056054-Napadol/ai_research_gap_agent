@@ -57,6 +57,7 @@ class GapCandidate(TypedDict, total=False):
     evidence_coverage: float   # len(evidence_read_ids) / len(supporting_paper_ids)
     counterexample_searches: list  # search_corpus queries the verifier ran before accepting the claim
     dropped_ids: list          # cited ids that do not exist among the analyzed papers (hallucinated)
+    citation_check: dict       # citations.gap_citation_summary: n_cited, n_ok, n_verified, problems
 
 
 class AgentState(TypedDict, total=False):
@@ -65,6 +66,7 @@ class AgentState(TypedDict, total=False):
     year_from: Optional[int]
     year_to: Optional[int]
     max_papers: int
+    search_conditions: dict     # conditions.normalize: {focus, include, exclude} - redacted in Node 0
 
     # --- Node 0: sanitize_input (decision model) ---
     input_decision: dict        # {action: PROCEED|PROCEED_REDACTED|REJECT, message, rule, why}
@@ -87,8 +89,12 @@ class AgentState(TypedDict, total=False):
     selected_papers: list       # list[Paper], top max_deep_analysis_papers
 
     # --- Node 4 ---
-    retry_count: int
+    retry_count: int            # "too few" loops (broader queries)
+    narrow_count: int           # "too broad" loops (more specific queries)
     sufficient: bool
+    search_verdict: str         # "sufficient" | "too_few" | "too_broad" - nodes.check_sufficiency
+    last_round_scope: dict      # {n_candidates, n_passed, pass_rate} of the last round (for the narrow prompt)
+    excluded_by_conditions: list  # [{id, title, reason}] candidates dropped by the user's include/exclude terms
 
     # --- Node 5 ---
     paper_extracts: list        # list[PaperExtract]
@@ -103,6 +109,9 @@ class AgentState(TypedDict, total=False):
 
     # --- Node 7 ---
     gap_candidates: list        # list[GapCandidate]
+
+    # --- Node 7b: verify_citations (citations.py) ---
+    citation_checks: dict       # {paper_id: {status, summary, checks}} for every paper a gap cites
 
     # --- Node 8: privacy_guard on the final answer ---
     final_answer_redactions: int

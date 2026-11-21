@@ -417,27 +417,43 @@ Dashboard อ่านทุก run ที่บันทึกใน `output/` 
 
 - docs/AI_Research_Assistant_Agent_Architecture.docx เป็นเอกสารออกแบบฉบับแรก (ส.ค. 2026) ปรับปรุงเมื่อ 2026-11-21 ให้ตรงกับระบบปัจจุบัน และ docs/NLP_AI Research Assistant Agent.pdf เป็นข้อเสนอโครงการที่ส่งอาจารย์ คงไว้ตามต้นฉบับ
 
-## 9. เทียบ feedback ของอาจารย์กับสิ่งที่ทำแล้ว
+## 9. เทียบ feedback ของอาจารย์กับสิ่งที่ทำแล้ว (ปรับล่าสุด 21 พ.ย. 2026)
 
-ทุกข้อที่แก้ด้วยโค้ดได้ทำแล้ว ส่วนที่เหลือคือการประเมินที่ต้องใช้คำตอบจากคน
+ทุกข้อที่แก้ด้วยโค้ดได้ทำแล้ว ส่วนที่เหลือคือการประเมินที่ต้องใช้คำตอบจากคน (ขั้นตอนอยู่ใน `evaluation/eval_plan.md` §0–§8)
 
-| Feedback                                                     | สถานะ                      | หลักฐานในโค้ด                                                                                                         |
-|--------------------------------------------------------------|----------------------------|---------------------------------------------------------------------------------------------------------------------|
-| ใช้คำ "Potential Research Gaps" + บอกข้อจำกัด                   | ทำแล้ว                      | `evidence.ANSWER_TITLE`, `LIMITATION_NOTE` (evidence.py:11-18) ใช้ในรายงาน, UI, Dashboard, prompt                    |
-| ระบุขอบเขต: แหล่ง, คำค้น, ช่วงปี, จำนวน paper, abstract/full text | ทำแล้ว                      | `evidence.search_scope` (evidence.py:24) → รายงาน (main.py:30), UI (app.py:592), Langfuse trace                     |
-| เริ่มจากแหล่งเดียว / candidate 20–30                             | ตัดสินใจไม่ทำ                 | ใช้ 3 แหล่งที่มีการตัดรายการซ้ำและติดตามสถานะแหล่งแล้ว และ candidate 80 ตัดด้วย cut-off เหตุผลอยู่ใน README                        |
-| เลือก 8–12 paper                                              | ทำแล้ว                      | default 8 (`MAX_DEEP_ANALYSIS_PAPERS`)                                                                              |
-| ดึง Problem, Method, Dataset, Findings                        | ทำแล้ว                      | `PaperExtractOutput.problem` (contracts.py:45) + คอลัมน์ Problem ในตารางเปรียบเทียบ                                     |
-| Gap พร้อมรายการ paper + ข้อความหลักฐาน                          | ทำแล้ว                      | `evidence.evidence_quotes` (evidence.py:185) แสดงเฉพาะประโยคที่ยืนยันแล้ว                                                |
-| ผลน้อย → ขยาย keyword                                         | ทำแล้ว                      | `check_sufficiency` → `generate_keywords` + `RETRY_CONTEXT_TEMPLATE`                                                |
-| ผลกว้างเกิน → เพิ่มเงื่อนไข                                        | จัดการด้วย cut-off           | README หัวข้อ Decision rules: cut-off + `max_papers` แทนการวนคำค้น                                                     |
-| Paper ไม่มี abstract → ข้าม/แจ้ง                                 | ทำแล้ว                      | `skipped_papers` (nodes.py:326, 356) แสดงใน Search scope                                                            |
-| ตรวจแหล่งอ้างอิง                                                | บางส่วน                     | ในระบบ: ตัด id ที่ไม่มีจริง + ลิงก์จาก metadata; ตรวจ DOI กับ Crossref อยู่ใน `eval_citations.py`                              |
-| เงื่อนไขหยุด: รอบและค่าใช้จ่าย                                     | ทำแล้ว                      | `MAX_RETRY_LOOPS`, `MAX_SEARCH_TOOL_CALLS`, `MAX_TOOL_STEPS`, `MAX_RUN_TOKENS` (config.py:154) ตาราง 20 กฎใน README |
-| Confidence ไม่ใช่ตัวเลขที่ LLM ให้ตัวเอง + คำ มาก/ปานกลาง/จำกัด      | ทำแล้ว                      | `evidence.evidence_level` + เกณฑ์ใน config.py:176-193                                                                |
-| ประเมิน relevance Top 5/10 โดยคน                              | ทำแล้ว (ต้องรันใหม่เพื่อได้ p@10) | label 138 เรื่องใน `ranking_set.json`                                                                                 |
-| ประเมิน extraction เทียบคน                                     | รอคนกรอก                   | `eval_extraction.py` + template                                                                                     |
-| ประเมิน DOI/ชื่อ/ปี                                              | รอรัน                       | `eval_citations.py`                                                                                                 |
-| ประเมินการปรับ query                                           | รอรัน                       | `eval_query_adaptation.py`                                                                                          |
-| ไม่สร้าง paper/DOI ปลอม                                        | ทำแล้ว                      | metric `gap_ids_hallucinated`, ลิงก์สร้างจาก metadata (links.py)                                                       |
-| เวลา รอบ ค่าใช้จ่าย                                             | ทำแล้ว                      | `run_info.seconds`, `run_metrics` (token, tool calls), Langfuse                                                     |
+| Feedback | สถานะ | หลักฐานในโค้ด |
+|---|---|---|
+| ใช้คำ "Potential Research Gaps" + บอกข้อจำกัด | ทำแล้ว | `evidence.ANSWER_TITLE`, `LIMITATION_NOTE` ใช้ในรายงาน, UI, Dashboard, prompt |
+| ระบุขอบเขต: แหล่ง, คำค้น, ช่วงปี, จำนวน paper, abstract/full text | ทำแล้ว | `evidence.search_scope` — เพิ่มบรรทัด "Analysed from", เงื่อนไขผู้ใช้, รอบการค้น, Limits (token/เวลา) และสิ่งที่ไม่ครอบคลุม |
+| เริ่มจากแหล่งเดียว | ทำแล้ว | `ENABLED_SOURCES=openalex` เป็นค่าเริ่มต้น (config.py) เพิ่มแหล่งได้ผ่าน `.env` หรือ `--sources` และ UI เตือนเมื่อเกินขอบเขต MVP |
+| candidate 20–30 → เลือก 8–12 | ทำแล้ว | `MAX_CANDIDATE_PAPERS=30`, `MIN_CANDIDATE_PAPERS=20`, `MAX_DEEP_ANALYSIS_PAPERS=10`, slider ใน UI จำกัด 8–12 |
+| รับหัวข้อ ช่วงปี และ **เงื่อนไข** | ทำแล้ว | `conditions.py`: focus / include / exclude — ผ่าน privacy ใน node 0, ใช้ใน prompt node 1/2/7, กรองด้วยโค้ดใน node 3 |
+| ดึง Problem, Method, Dataset, Findings | ทำแล้ว | `PaperExtractOutput` + ตารางเปรียบเทียบ |
+| Gap พร้อมรายการ paper + ข้อความหลักฐาน | ทำแล้ว | `evidence.evidence_quotes` แสดงเฉพาะประโยคที่ยืนยันแล้ว |
+| ผลน้อย → ขยาย keyword | ทำแล้ว | `check_sufficiency` verdict `too_few` → `RETRY_CONTEXT_TEMPLATE` |
+| ผลกว้างเกิน → เพิ่มเงื่อนไข | ทำแล้ว | verdict `too_broad` (pool เต็มแต่ผ่าน cut-off < 40%) → `NARROW_CONTEXT_TEMPLATE` สูงสุด `MAX_NARROW_LOOPS` รอบ |
+| Paper ไม่มี abstract → ข้าม/แจ้ง | ทำแล้ว | `skipped_papers` แสดงใน Search scope |
+| ตรวจแหล่งอ้างอิง **ก่อน** สร้างรายงาน | ทำแล้ว | node `verify_citations` (citations.py) ตรวจกับ Crossref + OpenAlex; gap ที่อ้างอิงไม่ผ่านจะได้ไม่เกิน Moderate |
+| เงื่อนไขหยุด: รอบและค่าใช้จ่าย | ทำแล้ว | `MAX_RETRY_LOOPS`, `MAX_NARROW_LOOPS`, `MAX_RUN_TOKENS=250000`, `MAX_RUN_SECONDS=1800` (เปิดเป็นค่าเริ่มต้น) |
+| Confidence ไม่ใช่ตัวเลขที่ LLM ให้ตัวเอง + คำ มาก/ปานกลาง/จำกัด | ทำแล้ว | `evidence.evidence_level`; `HIGH_CONFIDENCE_MIN_SOURCES` เปลี่ยนเป็น 1 เพื่อให้ระดับ "มาก" เกิดได้เมื่อใช้แหล่งเดียว |
+| ชุดทดสอบจากหัวข้อวิจัยจำนวนหนึ่ง | ออกแบบแล้ว รอรัน | `evaluation/data/test_topics.json` (7 หัวข้อ: dev 2 / test 5) + `run_test_set.py` |
+| ประเมิน relevance Top 5/10, extraction, DOI, query, gap | ออกแบบแล้ว รอคนกรอก | `eval_plan.md` §0 (เป้าหมายตั้งไว้ก่อนเห็นผล, rubric, แบ่งงาน A/B/C) |
+| ไม่สร้าง paper/DOI/ผลการศึกษาที่ไม่มีจริง | ทำแล้ว + ประเมินเพิ่ม | ในระบบ: ตัด id ปลอม, ลิงก์จาก metadata, ตรวจ citation; ประเมิน: `eval_grounding.py` ตรวจข้อความอิสระ (DOI/ชื่อผู้แต่ง/ตัวเลข/ชื่อ dataset ที่ไม่อยู่ใน paper) + audit sheet ให้คนตรวจ |
+| เวลา รอบ ค่าใช้จ่าย | ทำแล้ว | `run_info.seconds`, `run_metrics`, บรรทัด Limits ในรายงาน, ตารางใน `run_test_set.py` |
+
+### 9.1 Tools ที่อาจารย์ยกตัวอย่าง กับส่วนที่ตรงกันในระบบ
+
+อาจารย์บอกว่าจำนวน tools ไม่ใช่ตัวกำหนดความเป็น Agentic สิ่งที่สำคัญคือการเลือกตามผลที่ได้ ตารางนี้บอกว่าแต่ละหน้าที่อยู่ตรงไหน และใครเป็นคนตัดสินใจ
+
+| Tool ที่อาจารย์ยกตัวอย่าง | ในระบบ | ใครตัดสินใจ |
+|---|---|---|
+| `analyze_topic` | node 0 (privacy + เงื่อนไข) + node 1 `generate_keywords` | LLM สร้างคำค้น, โค้ดตัดสินเรื่อง privacy |
+| `search_papers` | tool `search_papers` ใน node 2 | **LLM เลือกเอง** (คำค้น แหล่ง ช่วงปี จำนวน) ภายใต้ budget |
+| `retrieve_paper_metadata` | ผลของ `search_papers` (abstract, DOI, OA link) + `get_paper` ใน MCP server | โค้ด |
+| `rank_papers` | node 3 `filter_and_rank` (เงื่อนไข + embedding + cut-off) | โค้ด |
+| `refine_search_query` | node 4 verdict `too_few` / `too_broad` → node 1 พร้อม template ขยาย/แคบลง | โค้ดตัดสินว่าต้องปรับ, LLM เขียนคำค้นใหม่ |
+| `extract_paper_evidence` | node 5 `extract_paper_data` + `_quote_verified` | LLM สกัด, โค้ดตรวจ quote |
+| `compare_papers` | node 6 `compare_papers` | LLM |
+| (ตรวจ gap) | node 7 verifier agent: `get_paper_text`, `search_paper_chunks`, `search_corpus` | **LLM เลือกเอง** ว่าจะอ่านอะไร, โค้ดตัดสิน verdict |
+| `verify_citations` | node 7b `verify_citations` (citations.py) | โค้ด (ทำทุกครั้ง ไม่ให้ LLM ข้าม) |
+| `generate_report` | `main.render_report` / UI | โค้ด |
