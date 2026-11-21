@@ -119,7 +119,12 @@ def compare(paper: dict, rec: dict | None, title_sim: float) -> dict:
             "year_match": (y1 == y2) if (y1 and y2) else None,
             "year_within_1": (abs(int(y1) - int(y2)) <= 1) if (y1 and y2) else None,
             "doi_match": (d1 == d2) if (d1 and d2) else None,
+            "local_doi": d1 or None,
             "remote_title": rec.get("title"), "remote_year": y2, "remote_doi": d2 or None}
+
+
+# Preprint DOIs (arXiv's DataCite prefix): the same paper is often found under its published DOI.
+PREPRINT_DOI_PREFIXES = ("10.48550/",)
 
 
 def status_of(cmp: dict, how: str) -> tuple:
@@ -131,10 +136,17 @@ def status_of(cmp: dict, how: str) -> tuple:
         problems.append(f"title similarity {cmp['title_sim']:.2f}")
     if cmp["year_within_1"] is False:
         problems.append(f"year {cmp['remote_year']}")
+    published_as = None
     if cmp["doi_match"] is False:
-        problems.append(f"DOI {cmp['remote_doi']}")
+        if (cmp.get("local_doi") or "").startswith(PREPRINT_DOI_PREFIXES) and cmp["title_match"] \
+                and cmp["year_within_1"] is not False:
+            published_as = cmp["remote_doi"]      # arXiv preprint of a published paper - same work
+        else:
+            problems.append(f"DOI {cmp['remote_doi']}")
     if problems:
         return MISMATCH, problems
+    if published_as:
+        return VERIFIED, [f"preprint; published as {published_as}"]
     return (TITLE_ONLY if how == "by title" else VERIFIED), []
 
 
@@ -162,6 +174,8 @@ def check_paper(paper: dict, lookups: dict, title_sim: float) -> dict:
     if best["status"] == NOT_FOUND and any(r["status"] == UNCHECKED for r in results):
         best = next(r for r in results if r["status"] == UNCHECKED)   # absence not shown, just not checked
     summary = f"{best['service']} {best['how']}" + (f" - {', '.join(best['problems'])}" if best["problems"] else "")
+    if best["status"] == VERIFIED:
+        best["problems"] = []                         # a note (published version), not a problem
     return {"status": best["status"], "checks": results, "summary": summary}
 
 

@@ -1351,3 +1351,17 @@ def test_quality_filter_drops_upload_repositories_and_copies():
     assert [p["id"] for p in kept] == ["b", "d"]
     reasons = {d["id"]: d["reason"] for d in dropped}
     assert "10.5281" in reasons["a"] and reasons["c"] == "same abstract as b"
+
+
+def test_arxiv_preprint_of_a_published_paper_is_verified():
+    """Live run 21 Nov (Semantic Scholar): 5 cited arXiv DOIs came back as 'mismatch' only because
+    Crossref/OpenAlex returned the published version's DOI - same title, same year."""
+    import citations
+    paper = {"id": "s2:1", "title": "Zero-Shot Cross-Lingual NER Using Phonemic Representations", "year": 2024,
+             "doi": "10.48550/arXiv.2406.16030"}
+    rec = {"title": "Zero-Shot Cross-Lingual NER Using Phonemic Representations", "year": 2024,
+           "doi": "10.18653/v1/2024.emnlp-main.753"}
+    res = citations.check_paper(paper, {"crossref": lambda p: (rec, "by title")}, 0.9)
+    assert res["status"] == citations.VERIFIED and "published as 10.18653" in res["summary"]
+    other = {**paper, "doi": "10.1000/real"}                                   # a non-preprint DOI that differs
+    assert citations.check_paper(other, {"crossref": lambda p: (rec, "by DOI")}, 0.9)["status"] == citations.MISMATCH
