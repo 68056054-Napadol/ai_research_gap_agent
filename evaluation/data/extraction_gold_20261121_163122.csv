@@ -1,0 +1,8 @@
+﻿paper_id,title,problem,method,dataset,findings,annotator
+openalex:W2342255549,Pattern-based Extraction of Named Entities in Thai News Documents,,,,,
+semantic_scholar:361164bec1510e809f2a0ea19dd235d1c8a73080,Unseen Named Entity Recognition for Thai Language,,,,,
+semantic_scholar:5589af6e2055ba6a94ab3fedf540bc188bf9a09e,Thai Named Entity Recognition Using Bi-LSTM-CRF with Word and Character Representation,,,,,
+semantic_scholar:18f1a09e55c062a04a66115d1bc55db006baaaa0,Product Name Identification and Classification in Thai Economic News,,,,,
+openalex:W2251120091,The Effect of Answer Patterns for Supervised Named Entity Recognition in Thai,,,,,
+semantic_scholar:db48a4a97faebcb49b28a5b9908fcc4381d33235,Thai named entity recognition based on conditional random fields,,,,,
+semantic_scholar:a76c5f68d52d36e77833525e85b2cefc7b7e6b75,Thai Named Entity Recognition using BiLSTM-CNN-CRF enhanced by TCC,,,,,

@@ -1,0 +1,9 @@
+﻿paper_id,title,problem,method,dataset,findings,annotator
+openalex:W4412130138,To Protect the LLM Agent Against the Prompt Injection Attack with Polymorphic Prompt,,,,,
+openalex:W4416840250,PromptArmor: Simple yet Effective Prompt Injection Defenses,,,,,
+openalex:W4417307818,Design Patterns for Securing LLM Agents against Prompt Injections,,,,,
+arxiv:2509.14285v4,A Multi-Agent LLM Defense Pipeline Against Prompt Injection Attacks,,,,,
+arxiv:2511.15759v1,Securing AI Agents Against Prompt Injection Attacks,,,,,
+openalex:W4412944922,Defense Against Prompt Injection Attack by Leveraging Attack Techniques,,,,,
+arxiv:2410.07283v1,Prompt Infection: LLM-to-LLM Prompt Injection within Multi-Agent Systems,,,,,
+openalex:W4411119880,Adaptive Attacks Break Defenses Against Indirect Prompt Injection Attacks on LLM Agents,,,,,

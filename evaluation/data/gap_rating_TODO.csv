@@ -1,0 +1,16 @@
+﻿run_id,gap_no,claim,is_real_gap_in_these_papers (yes/partly/no),evidence_supports_claim (1-5),novelty (1-5),actionability (1-5),agrees_with_evidence_level (yes/no),matches_reference_gap (id or none),annotator,notes,topic,system_evidence_level
+20261121_162445,1,"The integration of multi-modal data (e.g., text and vision) into hallucination detection frameworks remains under-explored in the analysed papers.",,,,,,,,,T1: LLM hallucination detection,Limited
+20261121_162445,2,"The use of standardized, cross-model evaluation benchmarks for hallucination detection is under-explored in the analysed papers.",,,,,,,,,T1: LLM hallucination detection,Moderate
+20261121_162445,3,The application of hallucination detection methods to low-resource languages or underrepresented domains is under-explored in the analysed papers.,,,,,,,,,T1: LLM hallucination detection,Moderate
+20261121_162445,4,The exploration of hallucination detection methods that incorporate user feedback or interactive learning is under-explored in the analysed papers.,,,,,,,,,T1: LLM hallucination detection,Moderate
+20261121_163122,1,The combination of dynamic context-aware methods with traditional pattern-based approaches for Thai NER remains under-explored in the analysed papers.,,,,,,,,,T2: Thai named entity recognition,Moderate
+20261121_163122,2,The use of diverse and well-documented datasets for Thai NER is under-explored in the analysed papers.,,,,,,,,,T2: Thai named entity recognition,Moderate
+20261121_163122,3,"The application of Thai NER in non-news domains, such as social media or medical texts, appears under-explored in the analysed papers.",,,,,,,,,T2: Thai named entity recognition,Moderate
+20261121_163122,4,"The evaluation of Thai NER models using comprehensive and standardized metrics beyond accuracy, precision, and recall is under-explored in the analysed papers.",,,,,,,,,T2: Thai named entity recognition,Moderate
+20261121_163922,1,The integration of multi-modal evaluation frameworks with dynamic knowledge base updates remains under-explored.,,,,,,,,,T3: retrieval-augmented generation evaluation,Moderate
+20261121_163922,2,"There is limited exploration of cross-lingual evaluation frameworks for RAG systems, particularly in non-English and non-Chinese languages.",,,,,,,,,T3: retrieval-augmented generation evaluation,Moderate
+20261121_163922,3,The combination of robustness evaluation with multi-modal RAG systems is not explicitly addressed in the literature.,,,,,,,,,T3: retrieval-augmented generation evaluation,Moderate
+20261121_164942,1,The integration of dynamic prompt structuring with multi-layered defense frameworks remains under-explored in the analysed papers.,,,,,,,,,T4: prompt injection defense for LLM agents,Moderate
+20261121_164942,2,"The lack of standardized datasets across papers limits reproducibility and benchmarking, creating a gap in the field.",,,,,,,,,T4: prompt injection defense for LLM agents,Moderate
+20261121_164942,3,The effectiveness of defense mechanisms against adaptive attacks in multi-agent systems is under-explored.,,,,,,,,,T4: prompt injection defense for LLM agents,Moderate
+20261121_164942,4,The application of prompt injection defense mechanisms in retrieval-augmented generation (RAG) systems beyond the current benchmarks is under-explored.,,,,,,,,,T4: prompt injection defense for LLM agents,Moderate

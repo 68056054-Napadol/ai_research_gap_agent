@@ -1,0 +1,6 @@
+topic_id,topic,run_id,backend,papers_selected,papers_analysed,analysed_full_text,analysed_abstract_only,skipped,minutes,llm_calls,input_tokens,output_tokens,retry_count,queries_searched,n_gaps,evidence_levels
+T1,LLM hallucination detection,20261121_162445,local,8,7,6,1,1 (1x extraction failed (LLMError)),10.0,31,71372,9478,0,5,4,Limited:1; Moderate:3
+T2,Thai named entity recognition,20261121_163122,local,8,7,2,5,1 (1x extraction failed (LLMError)),6.5,27,45268,5513,0,5,4,Moderate:4
+T3,retrieval-augmented generation evaluation,20261121_163922,local,8,7,4,3,1 (1x extraction failed (LLMError)),8.0,27,49834,7005,0,5,3,Moderate:3
+T4,prompt injection defense for LLM agents,20261121_164942,local,8,8,8,0,0,10.3,31,70506,9487,0,5,4,Moderate:4
+T5,Thai legal document summarization,20261121_165459,local,0,0,0,0,0,5.2,13,20699,2100,3,15,0,-

@@ -1,0 +1,8 @@
+﻿paper_id,title,problem,method,dataset,findings,annotator
+openalex:W4402670272,Unsupervised Real-Time Hallucination Detection based on the Internal States of Large Language Models,,,,,
+semantic_scholar:eac149f27998ade4297e29211c6b373ece91bdfe,HallucinationX: Explainability-Guided Detection of Hallucinations in Large Language Models,,,,,
+semantic_scholar:f9ba533f0fd07c37cc2934f36f7f121c9062453a,Principled Detection of Hallucinations in Large Language Models via Multiple Testing,,,,,
+openalex:W4389524154,Hallucination Detection for Generative Large Language Models by Bayesian Sequential Estimation,,,,,
+semantic_scholar:532802e16afe781a6b30823111f0e8a225578ce6,HalluSAE: Detecting Hallucinations in Large Language Models via Sparse Auto-Encoders,,,,,
+arxiv:2407.04121v1,Hallucination Detection: Robustly Discerning Reliable Answers in Large Language Models,,,,,
+arxiv:2404.14233v2,Detecting and Mitigating Hallucination in Large Vision Language Models via Fine-Grained AI Feedback,,,,,
