@@ -1145,20 +1145,31 @@ def test_extraction_that_copies_the_template_is_re_asked(offline, monkeypatch):
 # Teacher feedback, Nov 2026: single-source MVP, 20-30 -> 8-12 papers, budgets, user conditions,
 # "too broad" rule, citation check before the report
 # ---------------------------------------------------------------------------
-def test_mvp_defaults(monkeypatch):
-    import config
-    for k in ("ENABLED_SOURCES", "MAX_CANDIDATE_PAPERS", "MAX_DEEP_ANALYSIS_PAPERS", "MAX_RUN_TOKENS",
-              "MAX_RUN_SECONDS", "HIGH_CONFIDENCE_MIN_SOURCES", "MIN_CANDIDATE_PAPERS"):
-        monkeypatch.delenv(k, raising=False)
-    cfg = config.Config.__dataclass_fields__
-    assert cfg["enabled_sources"].default == ("openalex",)
-    assert config._sources("openalex, arxiv ,bogus") == ("openalex", "arxiv")
-    assert config._sources("") == ("openalex",)
-    assert 20 <= cfg["max_candidate_papers"].default <= 30 and cfg["min_candidate_papers"].default == 20
-    assert 8 <= cfg["max_deep_analysis_papers"].default <= 12
-    assert (cfg["mvp_min_papers"].default, cfg["mvp_max_papers"].default) == (8, 12)
-    assert cfg["max_run_tokens"].default > 0 and cfg["max_run_seconds"].default > 0
-    assert cfg["high_confidence_min_sources"].default == 1      # Strong must stay reachable with one source
+def test_mvp_defaults():
+    """The defaults in the code, not what a local .env sets: config reads .env at import time, so
+    the check runs in a fresh interpreter with load_dotenv switched off and the MVP variables unset."""
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = (
+        "import dotenv, json; dotenv.load_dotenv = lambda *a, **k: False\n"
+        "import config\n"
+        "f = config.Config.__dataclass_fields__\n"
+        "print(json.dumps({k: f[k].default for k in ('enabled_sources', 'max_candidate_papers', 'min_candidate_papers',"
+        " 'max_deep_analysis_papers', 'mvp_min_papers', 'mvp_max_papers', 'max_run_tokens', 'max_run_seconds',"
+        " 'high_confidence_min_sources')}))\n"
+        "print(json.dumps([config._sources('openalex, arxiv ,bogus'), config._sources('')]))\n")
+    names = ("ENABLED_SOURCES", "MAX_CANDIDATE_PAPERS", "MIN_CANDIDATE_PAPERS", "MAX_DEEP_ANALYSIS_PAPERS",
+             "MVP_MIN_PAPERS", "MVP_MAX_PAPERS", "MAX_RUN_TOKENS", "MAX_RUN_SECONDS", "HIGH_CONFIDENCE_MIN_SOURCES")
+    env = {k: v for k, v in os.environ.items() if k not in names}
+    out = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True, check=True)
+    d, parsed = (json.loads(line) for line in out.stdout.strip().splitlines()[-2:])
+    assert d["enabled_sources"] == ["openalex"]
+    assert parsed == [["openalex", "arxiv"], ["openalex"]]
+    assert 20 <= d["max_candidate_papers"] <= 30 and d["min_candidate_papers"] == 20
+    assert 8 <= d["max_deep_analysis_papers"] <= 12
+    assert (d["mvp_min_papers"], d["mvp_max_papers"]) == (8, 12)
+    assert d["max_run_tokens"] > 0 and d["max_run_seconds"] > 0
+    assert d["high_confidence_min_sources"] == 1      # Strong must stay reachable with one source
 
 
 def test_condition_terms_match_words_and_thai():
